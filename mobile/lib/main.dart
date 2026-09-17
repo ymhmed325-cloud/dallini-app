@@ -1,4 +1,6 @@
+import 'dart:async';
 import 'dart:convert';
+import 'dart:io';
 import 'package:flutter/material.dart';
 import 'package:http/http.dart' as http;
 import 'package:shared_preferences/shared_preferences.dart';
@@ -77,15 +79,39 @@ class _LoginPageState extends State<LoginPage> {
     if (phone.text.trim().length < 9 || password.text.length < 6) { message('أدخل رقم هاتف صحيح وكلمة مرور من 6 أحرف على الأقل'); return; }
     if (register && name.text.trim().length < 2) { message('أدخل الاسم الكامل'); return; }
     setState(() { busy = true; });
-    try {
-      final endpoint = register ? 'register' : 'login';
-      final response = await http.post(Uri.parse('$apiUrl/api/auth/$endpoint'), headers: const {'Content-Type': 'application/json'}, body: jsonEncode({'name': name.text.trim(), 'phone': phone.text.trim(), 'password': password.text, 'role': role})).timeout(const Duration(seconds: 15));
-      final decoded = jsonDecode(response.body);
-      final data = decoded is Map ? Map<String, dynamic>.from(decoded) : <String, dynamic>{};
-      if (response.statusCode >= 200 && response.statusCode < 300 && data['user'] is Map) {
-        await widget.onDone('${data['token']}', Map<String, dynamic>.from(data['user'] as Map));
-      } else { message('${data['error'] ?? 'تعذر إتمام العملية'}'); }
-    } catch (_) { message('تعذر الاتصال بالخادم'); }
+    final endpoint = register ? 'register' : 'login';
+    final uri = Uri.parse('$apiUrl/api/auth/$endpoint');
+    final payload = jsonEncode({'name': name.text.trim(), 'phone': phone.text.trim(), 'password': password.text, 'role': role});
+    http.Response? response;
+    Object? lastError;
+    for (int attempt = 1; attempt <= 3; attempt++) {
+      try {
+        response = await http.post(uri, headers: const {'Content-Type': 'application/json'}, body: payload).timeout(const Duration(seconds: 60));
+        break;
+      } catch (e) {
+        lastError = e;
+        if (attempt < 3) {
+          if (mounted) message('جارٍ الاتصال بالخادم... إعادة المحاولة $attempt من 3');
+          await Future<void>.delayed(const Duration(seconds: 3));
+        }
+      }
+    }
+    if (response == null) {
+      final kind = lastError is TimeoutException ? 'انتهت مهلة الاتصال' : (lastError is SocketException ? 'لا يوجد اتصال بالإنترنت' : 'خطأ في الشبكة');
+      if (mounted) message('$kind — تعذر الوصول إلى $apiUrl');
+    } else {
+      try {
+        final decoded = jsonDecode(response.body);
+        final data = decoded is Map ? Map<String, dynamic>.from(decoded) : <String, dynamic>{};
+        if (response.statusCode >= 200 && response.statusCode < 300 && data['user'] is Map) {
+          await widget.onDone('${data['token']}', Map<String, dynamic>.from(data['user'] as Map));
+        } else {
+          if (mounted) message('${data['error'] ?? 'تعذر إتمام العملية (رمز ${response.statusCode})'}');
+        }
+      } catch (_) {
+        if (mounted) message('استجابة غير متوقعة من الخادم (رمز ${response.statusCode})');
+      }
+    }
     if (mounted) setState(() { busy = false; });
   }
   @override Widget build(BuildContext context) {
@@ -159,7 +185,7 @@ class _NewRequestPageState extends State<NewRequestPage> {
     if (token.isEmpty) { message('سجّل الدخول مرة أخرى'); return; }
     setState(() { sending = true; });
     try {
-      final r = await http.post(Uri.parse('$apiUrl/api/requests'), headers: {'Content-Type': 'application/json', 'Authorization': 'Bearer $token'}, body: jsonEncode({'category': service, 'description': desc.text.trim(), 'address': address.text.trim()})).timeout(const Duration(seconds: 15));
+      final r = await http.post(Uri.parse('$apiUrl/api/requests'), headers: {'Content-Type': 'application/json', 'Authorization': 'Bearer $token'}, body: jsonEncode({'category': service, 'description': desc.text.trim(), 'address': address.text.trim()})).timeout(const Duration(seconds: 60));
       final raw = jsonDecode(r.body);
       final data = raw is Map ? Map<String, dynamic>.from(raw) : <String, dynamic>{};
       if (r.statusCode >= 200 && r.statusCode < 300) { if (mounted) { message('تم إرسال الطلب بنجاح'); Navigator.pop(context); } } else { message('${data['error'] ?? 'تعذر إرسال الطلب'}'); }
@@ -186,7 +212,7 @@ class _OrdersPageState extends State<OrdersPage> {
     if (mounted) setState(() { loading = true; error = null; });
     final p = await SharedPreferences.getInstance(); final token = p.getString('token') ?? '';
     try {
-      final r = await http.get(Uri.parse('$apiUrl/api/requests/mine'), headers: {'Authorization': 'Bearer $token'}).timeout(const Duration(seconds: 15));
+      final r = await http.get(Uri.parse('$apiUrl/api/requests/mine'), headers: {'Authorization': 'Bearer $token'}).timeout(const Duration(seconds: 60));
       if (r.statusCode == 200) { final raw = jsonDecode(r.body); items = raw is List ? raw.map((e) => Map<String, dynamic>.from(e as Map)).toList() : <Map<String, dynamic>>[]; } else { error = 'تعذر تحميل الطلبات'; }
     } catch (_) { error = 'تعذر الاتصال بالخادم'; }
     if (mounted) setState(() { loading = false; });
