@@ -102,6 +102,55 @@ const post = (path, obj, token) => req(path, {
     const unauth = await req('/api/requests/mine');
     check('منع الوصول بلا توثيق', unauth.status === 401);
 
+
+    // ---------- مسار الفني: قبول + تتبّع المراحل ----------
+    const pPhone = '0771' + String(Date.now()).slice(-7);
+    const preg = await post('/api/auth/register', { name: 'فني اختبار', phone: pPhone, password, role: 'provider' });
+    check('إنشاء حساب فني', preg.status === 201 && !!preg.body.token, JSON.stringify(preg.body));
+    const ptoken = preg.body.token;
+
+    const open = await post('/api/requests', { category: 'سباكة', description: 'تسريب ماء في المطبخ', address: 'بغداد - الكرادة' }, token2);
+    check('طلب جديد متاح للفنيين', open.status === 201);
+    const reqId = open.body.id;
+
+    const list = await req('((none))'.replace('((none))','/api/providers/requests'), { headers: { Authorization: `Bearer ${ptoken}` } });
+    const found = Array.isArray(list.body) && list.body.some(x => String(x.id) === String(reqId));
+    check('الطلب يظهر في القائمة المتاحة', found);
+
+    const acc = await post(`/api/providers/requests/${reqId}/accept`, {}, ptoken);
+    check('الفني يقبل الطلب', acc.status === 200 && acc.body.request.status === 'accepted', JSON.stringify(acc.body).slice(0, 160));
+
+    const jobs = await req('/api/providers/jobs?filter=active', { headers: { Authorization: `Bearer ${ptoken}` } });
+    check('الطلب يظهر في طلباتي (الفني)', Array.isArray(jobs.body) && jobs.body.some(x => String(x.id) === String(reqId)));
+
+    // انتقال غير مسموح: من accepted إلى completed مباشرة
+    const jump = await post(`/api/providers/requests/${reqId}/status`, { status: 'completed' }, ptoken);
+    check('رفض الانتقال غير المسموح', jump.status === 409 && Array.isArray(jump.body.allowedNext), `status=${jump.status} body=${JSON.stringify(jump.body).slice(0,160)}`);
+
+    // الانتقالات بالترتيب
+    for (const st of ['on_way', 'arrived', 'in_progress', 'completed']) {
+      const r = await post(`/api/providers/requests/${reqId}/status`, { status: st }, ptoken);
+      check(`انتقال إلى ${st}`, r.status === 200 && r.body.request.status === st, `status=${r.status} ${JSON.stringify(r.body).slice(0,140)}`);
+    }
+
+    // لا انتقال بعد الاكتمال
+    const after = await post(`/api/providers/requests/${reqId}/status`, { status: 'on_way' }, ptoken);
+    check('رفض أي انتقال بعد الاكتمال', after.status === 409);
+
+    // تتبّع الطلب: العميل والفني مسموح، والغريب ممنوع
+    const track = await req(`/api/requests/${reqId}/timeline`, { headers: { Authorization: `Bearer ${token2}` } });
+    check('تتبّع الطلب للعميل', track.status === 200 && track.body.status === 'completed' && Array.isArray(track.body.events) && track.body.events.length >= 4, JSON.stringify(track.body).slice(0, 180));
+    const trackProvider = await req(`/api/requests/${reqId}/timeline`, { headers: { Authorization: `Bearer ${ptoken}` } });
+    check('تتبّع الطلب للفني', trackProvider.status === 200);
+    const stranger = await post('/api/auth/register', { name: 'غريب', phone: '0772' + String(Date.now()).slice(-7), password, role: 'customer' });
+    const trackStranger = await req(`/api/requests/${reqId}/timeline`, { headers: { Authorization: `Bearer ${stranger.body.token}` } });
+    check('منع تتبّع طلب ليس لك', trackStranger.status === 403);
+
+    // بوابة SMS: الحالة الظاهرة في /api/health
+    const health2 = await req('/api/health');
+    check('حالة بوابة SMS معروضة', typeof health2.body.sms === 'string', JSON.stringify(health2.body));
+    console.log(`     (بوابة SMS الحالية: ${health2.body.sms} | resetDemo: ${health2.body.resetDemo})`);
+
     console.log(`\nالنتيجة: ${passed} اختباراً ناجحاً ✅`);
   } catch (e) {
     console.error('\nفشل الاختبار:', e.message);

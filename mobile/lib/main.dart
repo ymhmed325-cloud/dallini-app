@@ -223,7 +223,7 @@ class _OrdersPageState extends State<OrdersPage> {
     if (loading) return const Center(child: CircularProgressIndicator());
     if (error != null) return Center(child: Column(mainAxisSize: MainAxisSize.min, children: <Widget>[Text(error!), const SizedBox(height: 12), FilledButton(onPressed: load, child: const Text('إعادة المحاولة'))]));
     if (items.isEmpty) return Center(child: Column(mainAxisSize: MainAxisSize.min, children: <Widget>[const Icon(Icons.receipt_long, size: 70, color: Colors.grey), const SizedBox(height: 12), const Text('ما عندك طلبات بعد', style: TextStyle(fontSize: 19, fontWeight: FontWeight.bold)), const SizedBox(height: 12), FilledButton.icon(onPressed: () { Navigator.push(context, MaterialPageRoute(builder: (_) => const NewRequestPage())).then((_) { load(); }); }, icon: const Icon(Icons.add), label: const Text('إنشاء طلب'))]));
-    return RefreshIndicator(onRefresh: load, child: ListView.builder(padding: const EdgeInsets.all(16), itemCount: items.length, itemBuilder: (context, i) { final x = items[i]; final k = services.indexOf('${x['category']}'); final n = k < 0 ? 0 : k; return Card(child: ListTile(leading: CircleAvatar(backgroundColor: serviceColors[n].withAlpha(45), foregroundColor: serviceColors[n], child: Icon(serviceIcons[n])), title: Text('${x['category']}', style: const TextStyle(fontWeight: FontWeight.w900)), subtitle: Text('${x['description']}\n${statusText(x['status'])}'), isThreeLine: true, trailing: const Icon(Icons.chevron_left), onTap: () { Navigator.push(context, MaterialPageRoute(builder: (_) => RequestDetailPage(request: x))).then((_) { load(); }); })); }));
+    return RefreshIndicator(onRefresh: load, child: ListView.builder(padding: const EdgeInsets.all(16), itemCount: items.length, itemBuilder: (context, i) { final x = items[i]; final k = services.indexOf('${x['category']}'); final n = k < 0 ? 0 : k; return Card(child: ListTile(leading: CircleAvatar(backgroundColor: serviceColors[n].withAlpha(45), foregroundColor: serviceColors[n], child: Icon(serviceIcons[n])), title: Text('${x['category']}', style: const TextStyle(fontWeight: FontWeight.w900)), subtitle: Text('${x['description']}\n${statusText(x['status'])}'), isThreeLine: true, trailing: IconButton(icon: const Icon(Icons.timeline), tooltip: 'تتبّع الطلب', onPressed: () { Navigator.push(context, MaterialPageRoute(builder: (_) => RequestTimelinePage(requestId: '${x['id']}', category: '${x['category']}', description: '${x['description']}'))); }), onTap: () { Navigator.push(context, MaterialPageRoute(builder: (_) => RequestDetailPage(request: x))).then((_) { load(); }); })); }));
   }
 }
 
@@ -292,28 +292,323 @@ class SimplePage extends StatelessWidget {
   @override Widget build(BuildContext context) { return Scaffold(appBar: AppBar(title: Text(title)), body: Center(child: Padding(padding: const EdgeInsets.all(28), child: Card(child: Padding(padding: const EdgeInsets.all(24), child: Column(mainAxisSize: MainAxisSize.min, children: <Widget>[CircleAvatar(radius: 36, child: Icon(icon, size: 36)), const SizedBox(height: 16), Text(title, style: const TextStyle(fontSize: 22, fontWeight: FontWeight.w900)), const SizedBox(height: 10), Text(text, textAlign: TextAlign.center)])))))); }
 }
 
-class ProviderJobsPage extends StatefulWidget { const ProviderJobsPage({super.key}); @override State<ProviderJobsPage> createState() => _ProviderJobsPageState(); }
-class _ProviderJobsPageState extends State<ProviderJobsPage> {
-  List<Map<String, dynamic>> jobs = <Map<String, dynamic>>[];
-  bool loading = true;
-  @override void initState() { super.initState(); load(); }
-  Future<void> load() async {
-    final p = await SharedPreferences.getInstance(); final token = p.getString('token') ?? '';
-    try { final r = await http.get(Uri.parse('$apiUrl/api/providers/requests'), headers: {'Authorization': 'Bearer $token'}); if (r.statusCode == 200) { final raw = jsonDecode(r.body); jobs = raw is List ? raw.map((e) => Map<String, dynamic>.from(e as Map)).toList() : <Map<String, dynamic>>[]; } } catch (_) {}
-    if (mounted) setState(() { loading = false; });
-  }
-  Future<void> accept(dynamic id) async {
-    final p = await SharedPreferences.getInstance(); final token = p.getString('token') ?? '';
-    try { await http.post(Uri.parse('$apiUrl/api/providers/requests/$id/accept'), headers: {'Authorization': 'Bearer $token'}); } catch (_) {}
-    await load();
-  }
+String statusLabel(String? s) {
+  const m = <String, String>{
+    'matching': 'جاري البحث عن فني',
+    'offer': 'وصل عرض فني',
+    'accepted': 'تم قبول الطلب',
+    'on_way': 'الفني في الطريق',
+    'arrived': 'وصل الفني للموقع',
+    'in_progress': 'قيد التنفيذ',
+    'completed': 'مكتمل',
+    'cancelled': 'ملغي',
+  };
+  return m[s] ?? (s ?? '');
+}
+
+const Map<String, String> statusActionLabel = <String, String>{
+  'on_way': 'أنا في الطريق',
+  'arrived': 'وصلت الموقع',
+  'in_progress': 'بدء التنفيذ',
+  'completed': 'إتمام الطلب',
+};
+
+const List<String> statusFlow = <String>['accepted', 'on_way', 'arrived', 'in_progress', 'completed'];
+
+String? nextStatusOf(String current) {
+  final i = statusFlow.indexOf(current);
+  if (i < 0 || i >= statusFlow.length - 1) return null;
+  return statusFlow[i + 1];
+}
+
+String _text(dynamic v, [String fallback = '']) {
+  if (v == null) return fallback;
+  final t = v.toString();
+  return t.isEmpty ? fallback : t;
+}
+
+class TimelineList extends StatelessWidget {
+  const TimelineList({super.key, required this.events});
+  final List<Map<String, dynamic>> events;
   @override Widget build(BuildContext context) {
-    if (loading) return const Center(child: CircularProgressIndicator());
-    if (jobs.isEmpty) return RefreshIndicator(onRefresh: load, child: ListView(padding: const EdgeInsets.all(18), children: const <Widget>[SizedBox(height: 150), Center(child: Text('لا توجد طلبات حالياً.'))]));
-    return RefreshIndicator(onRefresh: load, child: ListView(padding: const EdgeInsets.all(18), children: <Widget>[const Text('طلبات قريبة', style: TextStyle(fontSize: 24, fontWeight: FontWeight.w900)), const SizedBox(height: 12), ...jobs.map((job) => Card(child: ListTile(title: Text('${job['category']}', style: const TextStyle(fontWeight: FontWeight.w900)), subtitle: Text('${job['description']}\n${job['address'] ?? '-'}'), isThreeLine: true, trailing: FilledButton(onPressed: () { accept(job['id']); }, child: const Text('قبول'))))) ]));
+    if (events.isEmpty) return const Padding(padding: EdgeInsets.all(16), child: Text('لا توجد أحداث بعد.'));
+    return Column(children: events.reversed.map((e) {
+      final label = statusLabel(_text(e['status']));
+      final when = _text(e['created_at']);
+      final note = e['note'] == null ? '' : '\n' + _text(e['note']);
+      return Card(child: ListTile(
+        leading: CircleAvatar(backgroundColor: const Color(0xFF123B68).withAlpha(30), foregroundColor: const Color(0xFF123B68), child: const Icon(Icons.check_circle_outline)),
+        title: Text(label, style: const TextStyle(fontWeight: FontWeight.w800)),
+        subtitle: Text(when + note),
+        isThreeLine: e['note'] != null,
+      ));
+    }).toList());
   }
 }
 
+class RequestTimelinePage extends StatefulWidget {
+  const RequestTimelinePage({super.key, required this.requestId, this.category, this.description});
+  final String requestId;
+  final String? category;
+  final String? description;
+  @override State<RequestTimelinePage> createState() => _RequestTimelinePageState();
+}
+
+class _RequestTimelinePageState extends State<RequestTimelinePage> {
+  Map<String, dynamic>? data;
+  bool loading = true;
+  String? error;
+
+  @override void initState() { super.initState(); load(); }
+
+  Future<void> load() async {
+    if (mounted) setState(() { loading = true; error = null; });
+    final p = await SharedPreferences.getInstance();
+    final token = p.getString('token') ?? '';
+    try {
+      final r = await http.get(Uri.parse('$apiUrl/api/requests/${widget.requestId}/timeline'),
+        headers: {'Authorization': 'Bearer $token'}).timeout(const Duration(seconds: 60));
+      if (r.statusCode == 200) {
+        final raw = jsonDecode(r.body);
+        if (raw is Map) data = Map<String, dynamic>.from(raw);
+      } else if (r.statusCode == 403) {
+        error = 'لا تملك صلاحية عرض هذا الطلب';
+      } else {
+        error = 'تعذر تحميل حالة الطلب';
+      }
+    } catch (_) { error = 'تعذر الاتصال بالخادم'; }
+    if (mounted) setState(() { loading = false; });
+  }
+
+  @override Widget build(BuildContext context) {
+    final reqRaw = data?['request'];
+    final req = reqRaw is Map ? Map<String, dynamic>.from(reqRaw) : <String, dynamic>{};
+    final events = (data?['events'] as List?)?.map((e) => Map<String, dynamic>.from(e as Map)).toList() ?? <Map<String, dynamic>>[];
+    final current = _text(data?['status']);
+    final stepIndex = statusFlow.indexOf(current);
+    final title = _text(widget.category ?? req['category']);
+    final desc = _text(widget.description ?? req['description']);
+    final label = _text(data?['statusLabel'], statusLabel(current));
+    return Scaffold(
+      appBar: AppBar(title: const Text('تتبّع الطلب')),
+      body: RefreshIndicator(onRefresh: load, child: ListView(padding: const EdgeInsets.all(16), children: <Widget>[
+        if (loading) const Center(child: Padding(padding: EdgeInsets.all(30), child: CircularProgressIndicator())),
+        if (error != null) Column(children: <Widget>[
+          Text(error!, style: const TextStyle(fontSize: 17)),
+          const SizedBox(height: 12),
+          FilledButton(onPressed: load, child: const Text('إعادة المحاولة')),
+        ]),
+        if (!loading && error == null) ...<Widget>[
+          Card(child: Padding(padding: const EdgeInsets.all(18), child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: <Widget>[
+            Text(title, style: const TextStyle(fontSize: 22, fontWeight: FontWeight.w900)),
+            const SizedBox(height: 6),
+            Text(desc, style: const TextStyle(color: Color(0xFF55606E))),
+            const SizedBox(height: 12),
+            Row(children: <Widget>[const Icon(Icons.local_shipping_outlined), const SizedBox(width: 8), Expanded(child: Text('الحالة: $label', style: const TextStyle(fontWeight: FontWeight.w900)))]),
+          ]))),
+          const SizedBox(height: 14),
+          const Text('مراحل الطلب', style: TextStyle(fontSize: 20, fontWeight: FontWeight.w900)),
+          const SizedBox(height: 8),
+          ...List<Widget>.generate(statusFlow.length, (i) {
+            final reached = stepIndex >= i;
+            final isCurrent = stepIndex == i;
+            return Card(child: ListTile(
+              leading: CircleAvatar(
+                backgroundColor: reached ? const Color(0xFF123B68) : const Color(0xFFD9DEE6),
+                foregroundColor: Colors.white,
+                child: Icon(reached ? Icons.check_circle : Icons.radio_button_unchecked),
+              ),
+              title: Text(statusLabel(statusFlow[i]), style: TextStyle(fontWeight: isCurrent ? FontWeight.w900 : FontWeight.w600)),
+              subtitle: Text(isCurrent ? 'المرحلة الحالية' : (reached ? 'تمّت' : 'لم تبدأ')),
+            ));
+          }),
+          const SizedBox(height: 14),
+          const Text('سجل الأحداث', style: TextStyle(fontSize: 20, fontWeight: FontWeight.w900)),
+          const SizedBox(height: 8),
+          TimelineList(events: events),
+        ],
+      ])),
+    );
+  }
+}
+
+class ProviderJobDetailPage extends StatefulWidget {
+  const ProviderJobDetailPage({super.key, required this.job});
+  final Map<String, dynamic> job;
+  @override State<ProviderJobDetailPage> createState() => _ProviderJobDetailPageState();
+}
+
+class _ProviderJobDetailPageState extends State<ProviderJobDetailPage> {
+  late Map<String, dynamic> job;
+  List<Map<String, dynamic>> events = <Map<String, dynamic>>[];
+  bool busy = false;
+  bool loading = true;
+
+  @override void initState() { super.initState(); job = Map<String, dynamic>.from(widget.job); load(); }
+
+  void message(String s) { if (mounted) ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text(s))); }
+
+  Future<String> _token() async { final p = await SharedPreferences.getInstance(); return p.getString('token') ?? ''; }
+
+  Future<void> load() async {
+    final token = await _token();
+    try {
+      final r = await http.get(Uri.parse('$apiUrl/api/requests/${job['id']}/timeline'), headers: {'Authorization': 'Bearer $token'}).timeout(const Duration(seconds: 60));
+      if (r.statusCode == 200) {
+        final raw = jsonDecode(r.body);
+        if (raw is Map) {
+          final jr = raw['request'];
+          if (jr is Map) job = Map<String, dynamic>.from(jr);
+          events = (raw['events'] as List?)?.map((e) => Map<String, dynamic>.from(e as Map)).toList() ?? <Map<String, dynamic>>[];
+        }
+      }
+    } catch (_) {}
+    if (mounted) setState(() { loading = false; });
+  }
+
+  Future<void> changeStatus(String status) async {
+    setState(() { busy = true; });
+    final token = await _token();
+    try {
+      final r = await http.post(Uri.parse('$apiUrl/api/providers/requests/${job['id']}/status'),
+        headers: {'Authorization': 'Bearer $token', 'Content-Type': 'application/json'},
+        body: jsonEncode({'status': status})).timeout(const Duration(seconds: 60));
+      final raw = jsonDecode(r.body);
+      final data = raw is Map ? Map<String, dynamic>.from(raw) : <String, dynamic>{};
+      if (r.statusCode >= 200 && r.statusCode < 300) {
+        final jr = data['request'];
+        if (jr is Map) job = Map<String, dynamic>.from(jr);
+        message('تم التحديث: ' + statusLabel(status));
+        await load();
+      } else {
+        message(_text(data['error'], 'تعذر تحديث الحالة'));
+      }
+    } catch (_) { message('تعذر الاتصال بالخادم'); }
+    if (mounted) setState(() { busy = false; });
+  }
+
+  @override Widget build(BuildContext context) {
+    final currentStatus = _text(job['status']);
+    final next = nextStatusOf(currentStatus);
+    final k = services.indexOf(_text(job['category']));
+    final n = k < 0 ? 0 : k;
+    final cat = _text(job['category'], '-');
+    final desc = _text(job['description']);
+    final addr = _text(job['address'], 'لم يُحدد العنوان');
+    final label = statusLabel(currentStatus);
+    return Scaffold(
+      appBar: AppBar(title: const Text('إدارة الطلب')),
+      body: RefreshIndicator(onRefresh: load, child: ListView(padding: const EdgeInsets.all(16), children: <Widget>[
+        Card(child: Padding(padding: const EdgeInsets.all(18), child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: <Widget>[
+          Row(children: <Widget>[
+            CircleAvatar(backgroundColor: serviceColors[n].withAlpha(45), foregroundColor: serviceColors[n], child: Icon(serviceIcons[n])),
+            const SizedBox(width: 12),
+            Expanded(child: Text(cat, style: const TextStyle(fontSize: 21, fontWeight: FontWeight.w900))),
+          ]),
+          const SizedBox(height: 14),
+          Text(desc, style: const TextStyle(fontSize: 16)),
+          const SizedBox(height: 8),
+          Row(children: <Widget>[const Icon(Icons.location_on_outlined, size: 20), const SizedBox(width: 6), Expanded(child: Text(addr))]),
+          const SizedBox(height: 8),
+          Row(children: <Widget>[const Icon(Icons.flag_outlined, size: 20), const SizedBox(width: 6), Expanded(child: Text('الحالة: $label', style: const TextStyle(fontWeight: FontWeight.w900)))]),
+        ]))),
+        const SizedBox(height: 14),
+        if (next != null)
+          FilledButton.icon(onPressed: busy ? null : () { changeStatus(next); }, icon: const Icon(Icons.arrow_forward), label: Text(statusActionLabel[next] ?? statusLabel(next)))
+        else
+          const Card(child: ListTile(leading: Icon(Icons.check_circle, color: Colors.green), title: Text('هذا الطلب مكتمل أو ملغي'))),
+        if (busy) const Padding(padding: EdgeInsets.only(top: 12), child: Center(child: CircularProgressIndicator())),
+        const SizedBox(height: 18),
+        const Text('سجل الأحداث', style: TextStyle(fontSize: 20, fontWeight: FontWeight.w900)),
+        const SizedBox(height: 8),
+        if (loading) const Center(child: Padding(padding: EdgeInsets.all(20), child: CircularProgressIndicator())) else TimelineList(events: events),
+      ])),
+    );
+  }
+}
+
+class ProviderJobsPage extends StatefulWidget {
+  const ProviderJobsPage({super.key});
+  @override State<ProviderJobsPage> createState() => _ProviderJobsPageState();
+}
+
+class _ProviderJobsPageState extends State<ProviderJobsPage> {
+  List<Map<String, dynamic>> available = <Map<String, dynamic>>[];
+  List<Map<String, dynamic>> assigned = <Map<String, dynamic>>[];
+  bool loading = true;
+  String? error;
+
+  @override void initState() { super.initState(); load(); }
+
+  Future<String> _token() async { final p = await SharedPreferences.getInstance(); return p.getString('token') ?? ''; }
+
+  Future<void> load() async {
+    if (mounted) setState(() { loading = true; error = null; });
+    final token = await _token();
+    try {
+      final a = await http.get(Uri.parse('$apiUrl/api/providers/requests'), headers: {'Authorization': 'Bearer $token'}).timeout(const Duration(seconds: 60));
+      final b = await http.get(Uri.parse('$apiUrl/api/providers/jobs?filter=active'), headers: {'Authorization': 'Bearer $token'}).timeout(const Duration(seconds: 60));
+      if (a.statusCode == 200) { final raw = jsonDecode(a.body); available = raw is List ? raw.map((e) => Map<String, dynamic>.from(e as Map)).toList() : <Map<String, dynamic>>[]; }
+      if (b.statusCode == 200) { final raw = jsonDecode(b.body); assigned = raw is List ? raw.map((e) => Map<String, dynamic>.from(e as Map)).toList() : <Map<String, dynamic>>[]; }
+      if (a.statusCode != 200 && b.statusCode != 200) error = 'تعذر تحميل الطلبات';
+    } catch (_) { error = 'تعذر الاتصال بالخادم'; }
+    if (mounted) setState(() { loading = false; });
+  }
+
+  Future<void> accept(dynamic id) async {
+    final token = await _token();
+    try {
+      final r = await http.post(Uri.parse('$apiUrl/api/providers/requests/$id/accept'), headers: {'Authorization': 'Bearer $token'}).timeout(const Duration(seconds: 60));
+      if (r.statusCode >= 200 && r.statusCode < 300) {
+        if (mounted) ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content: Text('تم قبول الطلب، ستجده في تبويب طلباتي')));
+      } else {
+        final raw = jsonDecode(r.body);
+        final msg = raw is Map ? _text(raw['error'], 'تعذر قبول الطلب') : 'تعذر قبول الطلب';
+        if (mounted) ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text(msg)));
+      }
+    } catch (_) { if (mounted) ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content: Text('تعذر الاتصال بالخادم'))); }
+    await load();
+  }
+
+  Widget _jobCard(Map<String, dynamic> job, {required bool assignedJob}) {
+    final k = services.indexOf(_text(job['category']));
+    final n = k < 0 ? 0 : k;
+    final cat = _text(job['category'], '-');
+    final desc = _text(job['description']);
+    final addr = _text(job['address'], '-');
+    final label = statusLabel(_text(job['status']));
+    final body = desc + '\n' + addr + '\nالحالة: ' + label;
+    return Card(child: ListTile(
+      leading: CircleAvatar(backgroundColor: serviceColors[n].withAlpha(45), foregroundColor: serviceColors[n], child: Icon(serviceIcons[n])),
+      title: Text(cat, style: const TextStyle(fontWeight: FontWeight.w900)),
+      subtitle: Text(body, maxLines: 4),
+      isThreeLine: true,
+      trailing: assignedJob
+        ? const Icon(Icons.chevron_left)
+        : FilledButton(onPressed: () { accept(job['id']); }, child: const Text('قبول')),
+      onTap: assignedJob ? () { Navigator.push(context, MaterialPageRoute(builder: (_) => ProviderJobDetailPage(job: job))).then((_) { load(); }); } : null,
+    ));
+  }
+
+  @override Widget build(BuildContext context) {
+    if (loading) return const Center(child: CircularProgressIndicator());
+    if (error != null) return Center(child: Column(mainAxisSize: MainAxisSize.min, children: <Widget>[Text(error!), const SizedBox(height: 12), FilledButton(onPressed: load, child: const Text('إعادة المحاولة'))]));
+    return DefaultTabController(
+      length: 2,
+      child: Column(children: <Widget>[
+        const TabBar(tabs: <Widget>[Tab(text: 'طلباتي'), Tab(text: 'طلبات متاحة')]),
+        Expanded(child: TabBarView(children: <Widget>[
+          RefreshIndicator(onRefresh: load, child: ListView(padding: const EdgeInsets.all(16), children: <Widget>[
+            if (assigned.isEmpty) const Padding(padding: EdgeInsets.only(top: 60), child: Center(child: Text('لا توجد طلبات مسندة إليك حالياً.'))) else ...assigned.map((j) => _jobCard(j, assignedJob: true)),
+          ])),
+          RefreshIndicator(onRefresh: load, child: ListView(padding: const EdgeInsets.all(16), children: <Widget>[
+            if (available.isEmpty) const Padding(padding: EdgeInsets.only(top: 60), child: Center(child: Text('لا توجد طلبات متاحة حالياً.'))) else ...available.map((j) => _jobCard(j, assignedJob: false)),
+          ])),
+        ])),
+      ]),
+    );
+  }
+}
 
 class ForgotPasswordPage extends StatefulWidget {
   const ForgotPasswordPage({super.key});
