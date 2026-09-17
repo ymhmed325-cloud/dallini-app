@@ -219,7 +219,7 @@ class _RequestDetailPageState extends State<RequestDetailPage> {
     final p = await SharedPreferences.getInstance(); final token = p.getString('token') ?? '';
     setState(() { busy = true; });
     try {
-      final r = await http.post(Uri.parse('$apiUrl/api/requests/${request['id']}/accept-offer'), headers: {'Authorization': 'Bearer $token'});
+      final r = await http.post(Uri.parse('$apiUrl/api/requests/${request['id']}/accept-offer'), headers: {'Authorization': 'Bearer $token', 'Content-Type': 'application/json'}, body: jsonEncode({'providerId': offerId}));
       if (r.statusCode >= 200 && r.statusCode < 300) { final raw = jsonDecode(r.body); if (raw is Map && raw['request'] is Map) setState(() { request = Map<String, dynamic>.from(raw['request'] as Map); }); }
     } catch (_) {}
     if (mounted) setState(() { busy = false; });
