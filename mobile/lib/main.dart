@@ -125,6 +125,7 @@ class _LoginPageState extends State<LoginPage> {
       if (register) const SizedBox(height: 12),
       if (register) DropdownButtonFormField<String>(initialValue: role, decoration: const InputDecoration(labelText: 'نوع الحساب', border: OutlineInputBorder()), items: const <DropdownMenuItem<String>>[DropdownMenuItem<String>(value: 'customer', child: Text('مستخدم / طالب خدمة')), DropdownMenuItem<String>(value: 'provider', child: Text('فني / مقدم خدمة'))], onChanged: (v) { if (v != null) setState(() { role = v; }); }),
       const SizedBox(height: 18), SizedBox(width: double.infinity, height: 52, child: FilledButton(onPressed: busy ? null : submit, child: Text(busy ? 'جاري...' : (register ? 'إنشاء الحساب' : 'دخول')))),
+        TextButton(onPressed: () => Navigator.of(context).push(MaterialPageRoute<void>(builder: (_) => const ForgotPasswordPage())), child: const Text('نسيت كلمة المرور؟')),
       TextButton(onPressed: busy ? null : () { setState(() { register = !register; }); }, child: Text(register ? 'لدي حساب بالفعل' : 'إنشاء حساب جديد')),
       const Text('الحساب متصل بالخادم الحقيقي.', style: TextStyle(color: Colors.grey)),
     ])))))));
@@ -310,5 +311,89 @@ class _ProviderJobsPageState extends State<ProviderJobsPage> {
     if (loading) return const Center(child: CircularProgressIndicator());
     if (jobs.isEmpty) return RefreshIndicator(onRefresh: load, child: ListView(padding: const EdgeInsets.all(18), children: const <Widget>[SizedBox(height: 150), Center(child: Text('لا توجد طلبات حالياً.'))]));
     return RefreshIndicator(onRefresh: load, child: ListView(padding: const EdgeInsets.all(18), children: <Widget>[const Text('طلبات قريبة', style: TextStyle(fontSize: 24, fontWeight: FontWeight.w900)), const SizedBox(height: 12), ...jobs.map((job) => Card(child: ListTile(title: Text('${job['category']}', style: const TextStyle(fontWeight: FontWeight.w900)), subtitle: Text('${job['description']}\n${job['address'] ?? '-'}'), isThreeLine: true, trailing: FilledButton(onPressed: () { accept(job['id']); }, child: const Text('قبول'))))) ]));
+  }
+}
+
+
+class ForgotPasswordPage extends StatefulWidget {
+  const ForgotPasswordPage({super.key});
+  @override State<ForgotPasswordPage> createState() => _ForgotPasswordPageState();
+}
+
+class _ForgotPasswordPageState extends State<ForgotPasswordPage> {
+  final phone = TextEditingController();
+  final code = TextEditingController();
+  final password = TextEditingController();
+  bool busy = false;
+  bool sent = false;
+
+  @override void dispose() { phone.dispose(); code.dispose(); password.dispose(); super.dispose(); }
+
+  void message(String s) { if (mounted) ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text(s))); }
+
+  Future<Map<String, dynamic>?> call(String path, Map<String, dynamic> body) async {
+    try {
+      final r = await http.post(Uri.parse('$apiUrl/api/auth/$path'),
+        headers: const {'Content-Type': 'application/json'},
+        body: jsonEncode(body)).timeout(const Duration(seconds: 60));
+      final decoded = jsonDecode(r.body);
+      final data = decoded is Map ? Map<String, dynamic>.from(decoded) : <String, dynamic>{};
+      if (r.statusCode >= 200 && r.statusCode < 300) return data;
+      message('${data['error'] ?? 'تعذر إتمام العملية (رمز ${r.statusCode})'}');
+    } catch (e) {
+      message(e is TimeoutException ? 'انتهت مهلة الاتصال' : (e is SocketException ? 'لا يوجد اتصال بالإنترنت' : 'تعذر الاتصال بالخادم'));
+    }
+    return null;
+  }
+
+  Future<void> sendCode() async {
+    if (phone.text.trim().length < 9) { message('أدخل رقم هاتف صحيح'); return; }
+    setState(() { busy = true; });
+    final data = await call('forgot-password', {'phone': phone.text.trim()});
+    if (!mounted) return;
+    setState(() { busy = false; if (data != null) sent = true; });
+    if (data != null) {
+      final dev = data['devCode'];
+      message(dev != null ? 'رمز التحقق (وضع التجربة): $dev' : '${data['message'] ?? 'تم إرسال رمز التحقق'}');
+    }
+  }
+
+  Future<void> resetPassword() async {
+    if (code.text.trim().length != 6) { message('أدخل رمز التحقق المكوّن من 6 أرقام'); return; }
+    if (password.text.length < 6) { message('كلمة المرور يجب أن تكون 6 أحرف على الأقل'); return; }
+    setState(() { busy = true; });
+    final data = await call('reset-password', {'phone': phone.text.trim(), 'code': code.text.trim(), 'newPassword': password.text});
+    if (!mounted) return;
+    setState(() { busy = false; });
+    if (data != null) {
+      await showDialog<void>(context: context, builder: (c) => AlertDialog(
+        title: const Text('تم بنجاح'),
+        content: Text('${data['message'] ?? 'تم تغيير كلمة المرور'}'),
+        actions: <Widget>[TextButton(onPressed: () => Navigator.of(c).pop(), child: const Text('حسناً'))],
+      ));
+      if (mounted) Navigator.of(context).pop();
+    }
+  }
+
+  @override Widget build(BuildContext context) {
+    return Scaffold(
+      appBar: AppBar(title: const Text('استرجاع كلمة المرور')),
+      body: SafeArea(child: SingleChildScrollView(padding: const EdgeInsets.all(20), child: Column(crossAxisAlignment: CrossAxisAlignment.stretch, children: <Widget>[
+        const Text('أدخل رقم هاتفك المسجّل، ثم رمز التحقق، ثم كلمة المرور الجديدة.', style: TextStyle(fontSize: 15, color: Color(0xFF55606E))),
+        const SizedBox(height: 18),
+        TextField(controller: phone, keyboardType: TextInputType.phone, decoration: const InputDecoration(labelText: 'رقم الهاتف', border: OutlineInputBorder())),
+        const SizedBox(height: 12),
+        FilledButton.icon(onPressed: busy ? null : sendCode, icon: const Icon(Icons.sms_outlined), label: Text(sent ? 'إعادة إرسال الرمز' : 'إرسال رمز التحقق')),
+        if (sent) ...<Widget>[
+          const SizedBox(height: 18),
+          TextField(controller: code, keyboardType: TextInputType.number, decoration: const InputDecoration(labelText: 'رمز التحقق (6 أرقام)', border: OutlineInputBorder())),
+          const SizedBox(height: 12),
+          TextField(controller: password, obscureText: true, decoration: const InputDecoration(labelText: 'كلمة المرور الجديدة', border: OutlineInputBorder())),
+          const SizedBox(height: 16),
+          FilledButton(onPressed: busy ? null : resetPassword, child: const Text('تغيير كلمة المرور')),
+        ],
+        if (busy) const Padding(padding: EdgeInsets.only(top: 18), child: Center(child: CircularProgressIndicator())),
+      ]))),
+    );
   }
 }

@@ -1,5 +1,8 @@
 name: Build Dallini APK
 
+permissions:
+  contents: write
+
 on:
   push:
     branches: [main]
@@ -81,3 +84,33 @@ jobs:
         with:
           name: dallini-apk
           path: mobile/build/app/outputs/flutter-apk/app-release.apk
+
+  release:
+    needs: build
+    runs-on: ubuntu-latest
+    if: github.event_name == 'workflow_dispatch'
+    permissions:
+      contents: write
+    steps:
+      - name: Download built APK
+        uses: actions/download-artifact@v4
+        with:
+          name: dallini-apk
+          path: apk
+      - name: Publish GitHub Release with APK
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -e
+          ls -lh apk
+          TAG="v1.1.0-build${GITHUB_RUN_NUMBER}"
+          if gh release view "$TAG" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
+            echo "Release $TAG already exists, uploading asset"
+            gh release upload "$TAG" apk/app-release.apk --repo "$GITHUB_REPOSITORY" --clobber
+          else
+            gh release create "$TAG" apk/app-release.apk \
+              --repo "$GITHUB_REPOSITORY" \
+              --title "دلّيني $TAG" \
+              --notes "إصدار تلقائي من تشغيل GitHub Actions رقم ${GITHUB_RUN_NUMBER} عند الإيداع ${GITHUB_SHA}. تطبيق دلّيني للخدمات المنزلية، مبني مع API_URL مضبوط على خادم الإنتاج."
+          fi
+          echo "RELEASE_URL=https://github.com/$GITHUB_REPOSITORY/releases/tag/$TAG"

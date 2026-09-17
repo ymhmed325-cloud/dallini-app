@@ -22,3 +22,7 @@ npm-debug.log*
 # OS
 .DS_Store
 Thumbs.db
+
+# بيئة تجريبية
+.env
+*.log
