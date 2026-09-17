@@ -1,0 +1,27 @@
+name: Export Dallini Project ZIP
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [main]
+
+permissions:
+  contents: read
+
+jobs:
+  export:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Create project ZIP
+        run: |
+          zip -r /tmp/dallini-app-full.zip . -x '.git/*' '*.DS_Store' 'mobile/build/*' '.dart_tool/*' 'dallini-app-full.zip'
+
+      - name: Upload project ZIP
+        uses: actions/upload-artifact@v4
+        with:
+          name: dallini-app-full-project
+          path: /tmp/dallini-app-full.zip
+          if-no-files-found: error

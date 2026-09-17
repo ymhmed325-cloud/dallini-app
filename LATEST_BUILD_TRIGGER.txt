@@ -1,0 +1,1 @@
+Build the latest Dallini app from the current main branch.

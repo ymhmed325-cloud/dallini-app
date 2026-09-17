@@ -1,0 +1,83 @@
+name: Build Dallini APK
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+    inputs:
+      api_url:
+        description: 'رابط Backend'
+        required: false
+        default: 'https://dallini-app.onrender.com'
+        type: string
+
+env:
+  DEFAULT_API_URL: https://dallini-app.onrender.com
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+      - name: Set up Flutter
+        uses: subosito/flutter-action@v2
+        with:
+          channel: stable
+          cache: true
+      - name: Prepare Dallini Flutter project
+        run: |
+          set -e
+          rm -rf mobile
+          flutter create --platforms=android --org com.dallini mobile
+          cp mobile_source/pubspec.yaml mobile/pubspec.yaml
+          cp mobile_source/lib/app_fixed.dart mobile/lib/main.dart
+      - name: Set Android App Name
+        working-directory: mobile
+        run: |
+          python3 - <<'PY'
+          from pathlib import Path
+          p=Path('android/app/src/main/AndroidManifest.xml')
+          s=p.read_text()
+          s=s.replace('android:label="mobile"','android:label="دلّيني"')
+          p.write_text(s)
+          PY
+      - name: Add Android permissions
+        working-directory: mobile
+        run: |
+          python3 - <<'PY'
+          from pathlib import Path
+          p=Path('android/app/src/main/AndroidManifest.xml')
+          s=p.read_text()
+          marker='<manifest xmlns:android="http://schemas.android.com/apk/res/android">'
+          permissions='''<uses-permission android:name="android.permission.INTERNET"/>
+          <uses-permission android:name="android.permission.ACCESS_FINE_LOCATION"/>
+          <uses-permission android:name="android.permission.ACCESS_COARSE_LOCATION"/>
+          <uses-permission android:name="android.permission.RECORD_AUDIO"/>'''
+          if 'android.permission.INTERNET' not in s:
+              s=s.replace(marker,marker+'\n'+permissions)
+          p.write_text(s)
+          PY
+      - name: Get packages
+        working-directory: mobile
+        run: flutter pub get
+      - name: Analyze Dart
+        working-directory: mobile
+        run: dart analyze lib/main.dart --no-fatal-warnings
+      - name: Build release APK
+        working-directory: mobile
+        env:
+          API_URL_INPUT: ${{ inputs.api_url }}
+        run: |
+          API_URL_VALUE="${API_URL_INPUT:-$DEFAULT_API_URL}"
+          flutter build apk --release --dart-define=API_URL="$API_URL_VALUE"
+      - name: Check APK
+        working-directory: mobile
+        run: |
+          test -f build/app/outputs/flutter-apk/app-release.apk
+          ls -lh build/app/outputs/flutter-apk/app-release.apk
+      - name: Upload APK
+        uses: actions/upload-artifact@v4
+        with:
+          name: dallini-apk
+          path: mobile/build/app/outputs/flutter-apk/app-release.apk

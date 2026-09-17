@@ -1,0 +1,63 @@
+const express = require('express');
+const cors = require('cors');
+const crypto = require('crypto');
+const { Pool } = require('pg');
+
+const app = express();
+const PORT = process.env.PORT || 10000;
+app.use(cors());
+app.use(express.json({ limit: '8mb' }));
+
+const categories = [
+  { id:'electricity', name:'كهرباء', icon:'bolt' },
+  { id:'plumbing', name:'سباكة', icon:'water_drop' },
+  { id:'air_conditioning', name:'تكييف', icon:'ac_unit' },
+  { id:'appliances', name:'صيانة أجهزة', icon:'build' },
+  { id:'cleaning', name:'تنظيف', icon:'cleaning_services' },
+  { id:'cars', name:'سيارات', icon:'directions_car' },
+];
+const demoProviders = [
+  { id:'p1', name:'أحمد علي', phone:'07700000001', role:'provider', service:'تكييف', rating:4.8, price:25000, eta:'30 دقيقة', verified:true },
+  { id:'p2', name:'محمد كريم', phone:'07700000002', role:'provider', service:'كهرباء', rating:4.7, price:20000, eta:'40 دقيقة', verified:true },
+];
+const memory = { users:new Map(), sessions:new Map(), requests:[], offers:new Map(), nextUser:1, nextRequest:1 };
+let pool = null;
+if (process.env.DATABASE_URL) pool = new Pool({ connectionString:process.env.DATABASE_URL, ssl:{rejectUnauthorized:false}, max:5 });
+
+function hashPassword(password,salt=crypto.randomBytes(16).toString('hex')){return `${salt}:${crypto.scryptSync(password,salt,64).toString('hex')}`;}
+function verifyPassword(password,stored){const [salt,hash]=String(stored||'').split(':');if(!salt||!hash)return false;const actual=crypto.scryptSync(password,salt,64).toString('hex');return crypto.timingSafeEqual(Buffer.from(hash,'hex'),Buffer.from(actual,'hex'));}
+function token(){return crypto.randomBytes(32).toString('hex');}
+function normalizePhone(v){return String(v||'').replace(/\s+/g,'').replace(/^00/,'+');}
+
+async function initDb(){
+  if(!pool)return;
+  await pool.query(`CREATE TABLE IF NOT EXISTS users (id SERIAL PRIMARY KEY,name TEXT NOT NULL,phone TEXT UNIQUE NOT NULL,password_hash TEXT NOT NULL,role TEXT NOT NULL DEFAULT 'customer',created_at TIMESTAMPTZ NOT NULL DEFAULT NOW());`);
+  await pool.query(`CREATE TABLE IF NOT EXISTS sessions (token TEXT PRIMARY KEY,user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,created_at TIMESTAMPTZ NOT NULL DEFAULT NOW());`);
+  await pool.query(`CREATE TABLE IF NOT EXISTS requests (id SERIAL PRIMARY KEY,user_id INTEGER REFERENCES users(id) ON DELETE SET NULL,category TEXT NOT NULL,description TEXT NOT NULL,address TEXT,lat DOUBLE PRECISION,lng DOUBLE PRECISION,status TEXT NOT NULL DEFAULT 'matching',provider_id INTEGER,created_at TIMESTAMPTZ NOT NULL DEFAULT NOW());`);
+  await pool.query(`CREATE TABLE IF NOT EXISTS offers (id SERIAL PRIMARY KEY,request_id INTEGER NOT NULL REFERENCES requests(id) ON DELETE CASCADE,provider_id INTEGER NOT NULL,price INTEGER NOT NULL,eta TEXT NOT NULL,created_at TIMESTAMPTZ NOT NULL DEFAULT NOW());`);
+}
+async function userById(id){if(!pool)return [...memory.users.values()].find(u=>String(u.id)===String(id))||null;const r=await pool.query('SELECT id,name,phone,role,created_at FROM users WHERE id=$1',[id]);return r.rows[0]||null;}
+async function auth(req,res,next){const h=String(req.headers.authorization||'');const t=h.startsWith('Bearer ')?h.slice(7):'';if(!t)return res.status(401).json({error:'يجب تسجيل الدخول'});let uid=memory.sessions.get(t);if(pool){const r=await pool.query('SELECT user_id FROM sessions WHERE token=$1',[t]);if(r.rows[0])uid=r.rows[0].user_id;}if(!uid)return res.status(401).json({error:'انتهت الجلسة، سجل الدخول مرة أخرى'});req.user=await userById(uid);if(!req.user)return res.status(401).json({error:'الحساب غير موجود'});req.token=t;next();}
+
+app.get('/api/health',(q,r)=>r.json({ok:true,service:'Dallini Backend',database:!!pool}));
+app.get('/api/categories',(q,r)=>r.json(categories));
+
+app.post('/api/auth/register',async(req,res)=>{try{const name=String(req.body.name||'').trim(),phone=normalizePhone(req.body.phone),password=String(req.body.password||''),role=req.body.role==='provider'?'provider':'customer';if(name.length<2)return res.status(400).json({error:'اكتب اسمك'});if(phone.length<9)return res.status(400).json({error:'أدخل رقم هاتف صحيح'});if(password.length<6)return res.status(400).json({error:'كلمة المرور يجب أن تكون 6 أحرف على الأقل'});let user,id;if(pool){if((await pool.query('SELECT id FROM users WHERE phone=$1',[phone])).rows[0])return res.status(409).json({error:'رقم الهاتف مستخدم مسبقاً'});const r=await pool.query('INSERT INTO users(name,phone,password_hash,role) VALUES($1,$2,$3,$4) RETURNING id,name,phone,role,created_at',[name,phone,hashPassword(password),role]);user=r.rows[0];id=user.id;}else{if([...memory.users.values()].some(u=>u.phone===phone))return res.status(409).json({error:'رقم الهاتف مستخدم مسبقاً'});id=memory.nextUser++;user={id,name,phone,role,created_at:new Date().toISOString()};memory.users.set(id,{...user,password_hash:hashPassword(password)});}const t=token();if(pool)await pool.query('INSERT INTO sessions(token,user_id) VALUES($1,$2)',[t,id]);else memory.sessions.set(t,id);res.status(201).json({token:t,user});}catch(e){console.error(e);res.status(500).json({error:'تعذر إنشاء الحساب'});}});
+app.post('/api/auth/login',async(req,res)=>{try{const phone=normalizePhone(req.body.phone),password=String(req.body.password||'');let row;if(pool)row=(await pool.query('SELECT * FROM users WHERE phone=$1',[phone])).rows[0];else row=[...memory.users.values()].find(u=>u.phone===phone);if(!row||!verifyPassword(password,row.password_hash))return res.status(401).json({error:'رقم الهاتف أو كلمة المرور غير صحيحة'});const t=token();if(pool)await pool.query('INSERT INTO sessions(token,user_id) VALUES($1,$2)',[t,row.id]);else memory.sessions.set(t,row.id);res.json({token:t,user:{id:row.id,name:row.name,phone:row.phone,role:row.role}});}catch(e){console.error(e);res.status(500).json({error:'تعذر تسجيل الدخول'});}});
+app.get('/api/auth/me',auth,(req,res)=>res.json({user:req.user}));
+app.post('/api/auth/logout',auth,async(req,res)=>{if(pool)await pool.query('DELETE FROM sessions WHERE token=$1',[req.token]);else memory.sessions.delete(req.token);res.json({ok:true});});
+
+app.post('/api/requests',auth,async(req,res)=>{try{const category=String(req.body.category||'كهرباء'),description=String(req.body.description||'').trim();if(description.length<4)return res.status(400).json({error:'اكتب وصف المشكلة'});const address=String(req.body.address||'').trim()||null,lat=req.body.lat??null,lng=req.body.lng??null;let x;if(pool)x=(await pool.query('INSERT INTO requests(user_id,category,description,address,lat,lng) VALUES($1,$2,$3,$4,$5,$6) RETURNING *',[req.user.id,category,description,address,lat,lng])).rows[0];else{x={id:String(memory.nextRequest++),user_id:req.user.id,category,description,address,lat,lng,status:'matching',created_at:new Date().toISOString()};memory.requests.unshift(x);memory.offers.set(x.id,[]);}res.status(201).json(x);}catch(e){console.error(e);res.status(500).json({error:'تعذر إنشاء الطلب'});}});
+app.get('/api/requests/mine',auth,async(req,res)=>{if(pool)return res.json((await pool.query('SELECT * FROM requests WHERE user_id=$1 ORDER BY created_at DESC',[req.user.id])).rows);res.json(memory.requests.filter(x=>String(x.user_id)===String(req.user.id)));});
+app.get('/api/requests/:id',auth,async(req,res)=>{if(pool){const r=await pool.query('SELECT * FROM requests WHERE id=$1 AND user_id=$2',[req.params.id,req.user.id]);if(!r.rows[0])return res.status(404).json({error:'الطلب غير موجود'});return res.json(r.rows[0]);}const x=memory.requests.find(a=>String(a.id)===String(req.params.id)&&String(a.user_id)===String(req.user.id));if(!x)return res.status(404).json({error:'الطلب غير موجود'});res.json(x);});
+app.get('/api/requests/:id/offers',auth,async(req,res)=>{if(pool){const own=await pool.query('SELECT id FROM requests WHERE id=$1 AND user_id=$2',[req.params.id,req.user.id]);if(!own.rows[0])return res.status(404).json({error:'الطلب غير موجود'});return res.json((await pool.query('SELECT o.*,u.name FROM offers o LEFT JOIN users u ON u.id=o.provider_id WHERE o.request_id=$1',[req.params.id])).rows);}res.json(memory.offers.get(String(req.params.id))||[]);});
+app.post('/api/requests/:id/accept-offer',auth,async(req,res)=>{if(pool){const r=await pool.query("UPDATE requests SET status='accepted',provider_id=$1 WHERE id=$2 AND user_id=$3 RETURNING *",[req.body.providerId||1,req.params.id,req.user.id]);if(!r.rows[0])return res.status(404).json({error:'الطلب غير موجود'});return res.json({ok:true,request:r.rows[0]});}const x=memory.requests.find(a=>String(a.id)===String(req.params.id)&&String(a.user_id)===String(req.user.id));if(!x)return res.status(404).json({error:'الطلب غير موجود'});x.status='accepted';x.provider=demoProviders[0];res.json({ok:true,request:x});});
+app.post('/api/requests/:id/next',auth,async(req,res)=>{const flow=['matching','offer','accepted','on_way','arrived','in_progress','completed'];if(pool){const own=(await pool.query('SELECT * FROM requests WHERE id=$1 AND user_id=$2',[req.params.id,req.user.id])).rows[0];if(!own)return res.status(404).json({error:'الطلب غير موجود'});const i=Math.max(0,flow.indexOf(own.status)),status=flow[Math.min(flow.length-1,i+1)];const r=await pool.query('UPDATE requests SET status=$1 WHERE id=$2 RETURNING *',[status,req.params.id]);if(status==='offer')await pool.query('INSERT INTO offers(request_id,provider_id,price,eta) VALUES($1,$2,$3,$4)',[req.params.id,1,25000,'30 دقيقة']);return res.json({ok:true,request:r.rows[0]});}const x=memory.requests.find(a=>String(a.id)===String(req.params.id)&&String(a.user_id)===String(req.user.id));if(!x)return res.status(404).json({error:'الطلب غير موجود'});const i=Math.max(0,flow.indexOf(x.status));x.status=flow[Math.min(flow.length-1,i+1)];if(x.status==='offer')memory.offers.set(String(x.id),[demoProviders[0]]);res.json({ok:true,request:x,offers:memory.offers.get(String(x.id))||[]});});
+app.post('/api/requests/:id/cancel',auth,async(req,res)=>{if(pool){const r=await pool.query("UPDATE requests SET status='cancelled' WHERE id=$1 AND user_id=$2 AND status<>'completed' RETURNING *",[req.params.id,req.user.id]);if(!r.rows[0])return res.status(409).json({error:'لا يمكن إلغاء الطلب'});return res.json({ok:true,request:r.rows[0]});}const x=memory.requests.find(a=>String(a.id)===String(req.params.id)&&String(a.user_id)===String(req.user.id));if(!x)return res.status(404).json({error:'الطلب غير موجود'});if(x.status==='completed')return res.status(409).json({error:'لا يمكن إلغاء طلب مكتمل'});x.status='cancelled';res.json({ok:true,request:x});});
+
+app.get('/api/providers/requests',auth,async(req,res)=>{if(req.user.role!=='provider')return res.status(403).json({error:'هذا القسم للفنيين'});if(pool)return res.json((await pool.query("SELECT * FROM requests WHERE status IN ('matching','offer') ORDER BY created_at DESC LIMIT 50")).rows);res.json(memory.requests.filter(x=>['matching','offer'].includes(x.status)).slice(0,50));});
+app.post('/api/providers/requests/:id/accept',auth,async(req,res)=>{if(req.user.role!=='provider')return res.status(403).json({error:'هذا القسم للفنيين'});if(pool){const r=await pool.query("UPDATE requests SET status='accepted',provider_id=$1 WHERE id=$2 AND status IN ('matching','offer') RETURNING *",[req.user.id,req.params.id]);if(!r.rows[0])return res.status(404).json({error:'الطلب غير متاح'});return res.json({ok:true,request:r.rows[0]});}const x=memory.requests.find(a=>String(a.id)===String(req.params.id));if(!x)return res.status(404).json({error:'الطلب غير موجود'});x.status='accepted';x.provider={id:req.user.id,name:req.user.name};res.json({ok:true,request:x});});
+app.get('/api/notifications',auth,(req,res)=>res.json([{id:'1',title:'دلّيني',message:'ستظهر هنا تحديثات الطلب والعروض الجديدة.'}]));
+app.get('/api/messages/:requestId',auth,(req,res)=>res.json([{from:'provider',text:'أهلاً، وصلتني تفاصيل طلبك.'}]));
+app.get('/',(req,res)=>res.send('دلّيني Backend يعمل بنجاح 🚀'));
+initDb().then(()=>app.listen(PORT,'0.0.0.0',()=>console.log(`Dallini Backend on ${PORT} database=${!!pool}`))).catch(e=>{console.error(e);process.exit(1);});
