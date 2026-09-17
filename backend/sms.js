@@ -20,6 +20,16 @@ function twilioAuthHeader() {
   return 'Basic ' + Buffer.from(`${process.env.TWILIO_ACCOUNT_SID}:${process.env.TWILIO_AUTH_TOKEN}`).toString('base64');
 }
 
+// Twilio requires phone numbers in E.164 format. Accept Iraqi local numbers too.
+function normalizeTwilioPhone(v) {
+  let p = String(v || '').trim().replace(/[\s()-]/g, '');
+  if (p.startsWith('00')) p = '+' + p.slice(2);
+  if (p.startsWith('+')) return p;
+  if (/^07\d{9}$/.test(p)) return '+964' + p.slice(1);
+  if (/^7\d{9}$/.test(p)) return '+964' + p;
+  return p;
+}
+
 async function sendTwilioVerify(phone, text) {
   // دلّيني يولّد الرمز محلياً حالياً؛ نمرره إلى Verify عبر CustomCode.
   // يجب تفعيل Enable Custom Verification Code في إعدادات خدمة Verify.
@@ -28,7 +38,7 @@ async function sendTwilioVerify(phone, text) {
 
   const url = `https://verify.twilio.com/v2/Services/${VERIFY_SERVICE_SID}/Verifications`;
   const body = new URLSearchParams({
-    To: phone,
+    To: normalizeTwilioPhone(phone),
     Channel: 'sms',
     CustomCode: match[1],
   });
@@ -64,7 +74,7 @@ async function sendSms(phone, text) {
     if (GATEWAY === 'twilio') {
       const sid = process.env.TWILIO_ACCOUNT_SID;
       const url = `https://api.twilio.com/2010-04-01/Accounts/${sid}/Messages.json`;
-      const body = new URLSearchParams({ To: phone, From: process.env.TWILIO_FROM, Body: text });
+      const body = new URLSearchParams({ To: normalizeTwilioPhone(phone), From: process.env.TWILIO_FROM, Body: text });
       const r = await fetch(url, {
         method: 'POST',
         headers: { Authorization: twilioAuthHeader(), 'Content-Type': 'application/x-www-form-urlencoded' },
