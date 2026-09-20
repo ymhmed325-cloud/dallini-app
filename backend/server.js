@@ -21,7 +21,7 @@ const demoProviders = [
   { id:'p2', name:'محمد كريم', phone:'07700000002', role:'provider', service:'كهرباء', rating:4.7, price:20000, eta:'40 دقيقة', verified:true },
 ];
 const memory = { users:new Map(), sessions:new Map(), requests:[], offers:new Map(), resets:new Map(), events:new Map(), nextUser:1, nextRequest:1 };
-const { sendSms, gatewayName, isConfigured: smsConfigured } = require('./sms');
+const { sendSms, checkTwilioVerify, gatewayName, isConfigured: smsConfigured } = require('./sms');
 // وضع التجربة: يُعاد رمز التحقق في الاستجابة.
 // إن كانت بوابة SMS مضبوطة فالحالة الافتراضية إرسال حقيقي، ما لم تُضبط RESET_DEMO_MODE=true.
 const RESET_DEMO = process.env.RESET_DEMO_MODE === 'true' || (!smsConfigured() && process.env.RESET_DEMO_MODE !== 'false');
@@ -68,13 +68,82 @@ app.get('/api/categories',(q,r)=>r.json(categories));
 app.post('/api/auth/register',async(req,res)=>{try{const name=String(req.body.name||'').trim(),phone=normalizePhone(req.body.phone),password=String(req.body.password||''),role=req.body.role==='provider'?'provider':'customer';if(name.length<2)return res.status(400).json({error:'اكتب اسمك'});if(phone.length<9)return res.status(400).json({error:'أدخل رقم هاتف صحيح'});if(password.length<6)return res.status(400).json({error:'كلمة المرور يجب أن تكون 6 أحرف على الأقل'});let user,id;if(pool){if((await pool.query('SELECT id FROM users WHERE phone=$1',[phone])).rows[0])return res.status(409).json({error:'رقم الهاتف مستخدم مسبقاً'});const r=await pool.query('INSERT INTO users(name,phone,password_hash,role) VALUES($1,$2,$3,$4) RETURNING id,name,phone,role,created_at',[name,phone,hashPassword(password),role]);user=r.rows[0];id=user.id;}else{if([...memory.users.values()].some(u=>u.phone===phone))return res.status(409).json({error:'رقم الهاتف مستخدم مسبقاً'});id=memory.nextUser++;user={id,name,phone,role,created_at:new Date().toISOString()};memory.users.set(id,{...user,password_hash:hashPassword(password)});}const t=token();if(pool)await pool.query('INSERT INTO sessions(token,user_id) VALUES($1,$2)',[t,id]);else memory.sessions.set(t,id);res.status(201).json({token:t,user});}catch(e){console.error(e);res.status(500).json({error:'تعذر إنشاء الحساب'});}});
 app.post('/api/auth/login',async(req,res)=>{try{const phone=normalizePhone(req.body.phone),password=String(req.body.password||'');let row;if(pool)row=(await pool.query('SELECT * FROM users WHERE phone=$1',[phone])).rows[0];else row=[...memory.users.values()].find(u=>u.phone===phone);if(!row||!verifyPassword(password,row.password_hash))return res.status(401).json({error:'رقم الهاتف أو كلمة المرور غير صحيحة'});const t=token();if(pool)await pool.query('INSERT INTO sessions(token,user_id) VALUES($1,$2)',[t,row.id]);else memory.sessions.set(t,row.id);res.json({token:t,user:{id:row.id,name:row.name,phone:row.phone,role:row.role}});}catch(e){console.error(e);res.status(500).json({error:'تعذر تسجيل الدخول'});}});
 function resetCode(){return String(crypto.randomInt(100000,1000000));}
-app.post('/api/auth/forgot-password',async(req,res)=>{try{const phone=normalizePhone(req.body.phone);if(phone.length<9)return res.status(400).json({error:'أدخل رقم هاتف صحيح'});let exists=false;if(pool)exists=!!(await pool.query('SELECT 1 FROM users WHERE phone=$1',[phone])).rows[0];else exists=[...memory.users.values()].some(u=>u.phone===phone);if(!exists)return res.status(404).json({error:'رقم الهاتف غير مسجل'});const code=resetCode(),expires=new Date(Date.now()+10*60*1000);if(pool)await pool.query('INSERT INTO password_resets(phone,code,expires,attempts) VALUES($1,$2,$3,0) ON CONFLICT (phone) DO UPDATE SET code=$2,expires=$3,attempts=0',[phone,code,expires]);else memory.resets.set(phone,{code,expires:expires.getTime(),attempts:0});const text=`رمز استرجاع كلمة المرور في تطبيق دلّيني: ${code} (صالح 10 دقائق)`;
-const delivery=await sendSms(phone,text);
-if(!delivery.sent&&!RESET_DEMO){console.error('sms failed',delivery);return res.status(502).json({error:'تعذر إرسال رمز التحقق عبر الرسائل، حاول لاحقاً'});}
-const body={ok:true,message:'تم إرسال رمز التحقق إلى هاتفك، صالح لمدة 10 دقائق',sent:!!delivery.sent,gateway:delivery.gateway};
-if(RESET_DEMO)body.devCode=code;
-res.json(body);}catch(e){console.error(e);res.status(500).json({error:'تعذر إنشاء رمز التحقق'});}});
-app.post('/api/auth/reset-password',async(req,res)=>{try{const phone=normalizePhone(req.body.phone),code=String(req.body.code||'').trim(),newPassword=String(req.body.newPassword||req.body.password||'');if(code.length!==6)return res.status(400).json({error:'أدخل رمز التحقق المكوّن من 6 أرقام'});if(newPassword.length<6)return res.status(400).json({error:'كلمة المرور يجب أن تكون 6 أحرف على الأقل'});let row;if(pool)row=(await pool.query('SELECT * FROM password_resets WHERE phone=$1',[phone])).rows[0];else{const m=memory.resets.get(phone);row=m?{code:m.code,expires:new Date(m.expires),attempts:m.attempts}:null;}if(!row)return res.status(400).json({error:'اطلب رمز التحقق أولاً'});if(new Date(row.expires).getTime()<Date.now())return res.status(400).json({error:'انتهت صلاحية الرمز، اطلب رمزاً جديداً'});if(Number(row.attempts)>=5)return res.status(429).json({error:'محاولات كثيرة، اطلب رمزاً جديداً'});if(String(row.code)!==code){if(pool)await pool.query('UPDATE password_resets SET attempts=attempts+1 WHERE phone=$1',[phone]);else{const m=memory.resets.get(phone);if(m)m.attempts+=1;}return res.status(400).json({error:'رمز التحقق غير صحيح'});}const hash=hashPassword(newPassword);if(pool){const r=await pool.query('UPDATE users SET password_hash=$1 WHERE phone=$2 RETURNING id',[hash,phone]);if(!r.rows[0])return res.status(404).json({error:'رقم الهاتف غير مسجل'});await pool.query('DELETE FROM sessions WHERE user_id=$1',[r.rows[0].id]);await pool.query('DELETE FROM password_resets WHERE phone=$1',[phone]);}else{const found=[...memory.users.entries()].find(([,v])=>v.phone===phone);if(!found)return res.status(404).json({error:'رقم الهاتف غير مسجل'});memory.users.set(found[0],{...found[1],password_hash:hash});for(const [t,uid] of [...memory.sessions.entries()])if(String(uid)===String(found[0]))memory.sessions.delete(t);memory.resets.delete(phone);}res.json({ok:true,message:'تم تغيير كلمة المرور، يمكنك تسجيل الدخول الآن'});}catch(e){console.error(e);res.status(500).json({error:'تعذر تغيير كلمة المرور'});}});
+app.post('/api/auth/forgot-password',async(req,res)=>{try{
+  const phone=normalizePhone(req.body.phone);
+  if(phone.length<9)return res.status(400).json({error:'أدخل رقم هاتف صحيح'});
+  let exists=false;
+  if(pool)exists=!!(await pool.query('SELECT 1 FROM users WHERE phone=$1',[phone])).rows[0];
+  else exists=[...memory.users.values()].some(u=>u.phone===phone);
+  if(!exists)return res.status(404).json({error:'رقم الهاتف غير مسجل'});
+
+  const code=resetCode(),expires=new Date(Date.now()+10*60*1000);
+  const text=`رمز استرجاع كلمة المرور في تطبيق دلّيني: ${code} (صالح 10 دقائق)`;
+  const delivery=await sendSms(phone,text);
+
+  if(!delivery.sent&&!RESET_DEMO){
+    console.error('sms failed',delivery);
+    return res.status(502).json({error:'تعذر إرسال رمز التحقق عبر الرسائل، حاول لاحقاً',gateway:delivery.gateway,reason:delivery.reason||null});
+  }
+
+  // Twilio Verify يولّد ويدير الرمز بنفسه؛ لا نخزن الرمز الحقيقي في قاعدة البيانات.
+  const storedCode=delivery.gateway==='twilio-verify' ? 'TWILIO' : code;
+  if(pool){
+    await pool.query('INSERT INTO password_resets(phone,code,expires,attempts) VALUES($1,$2,$3,0) ON CONFLICT (phone) DO UPDATE SET code=$2,expires=$3,attempts=0',[phone,storedCode,expires]);
+  }else{
+    memory.resets.set(phone,{code:storedCode,expires:expires.getTime(),attempts:0});
+  }
+
+  const body={ok:true,message:'تم إرسال رمز التحقق إلى هاتفك، صالح لمدة 10 دقائق',sent:!!delivery.sent,gateway:delivery.gateway};
+  if(RESET_DEMO)body.devCode=code;
+  res.json(body);
+}catch(e){console.error(e);res.status(500).json({error:'تعذر إنشاء رمز التحقق'});}});
+
+app.post('/api/auth/reset-password',async(req,res)=>{try{
+  const phone=normalizePhone(req.body.phone),code=String(req.body.code||'').trim(),newPassword=String(req.body.newPassword||req.body.password||'');
+  if(code.length!==6)return res.status(400).json({error:'أدخل رمز التحقق المكوّن من 6 أرقام'});
+  if(newPassword.length<6)return res.status(400).json({error:'كلمة المرور يجب أن تكون 6 أحرف على الأقل'});
+
+  let row;
+  if(pool)row=(await pool.query('SELECT * FROM password_resets WHERE phone=$1',[phone])).rows[0];
+  else{const m=memory.resets.get(phone);row=m?{code:m.code,expires:new Date(m.expires),attempts:m.attempts}:null;}
+  if(!row)return res.status(400).json({error:'اطلب رمز التحقق أولاً'});
+  if(new Date(row.expires).getTime()<Date.now())return res.status(400).json({error:'انتهت صلاحية الرمز، اطلب رمزاً جديداً'});
+  if(Number(row.attempts)>=5)return res.status(429).json({error:'محاولات كثيرة، اطلب رمزاً جديداً'});
+
+  let approved=false;
+  if(String(row.code)==='TWILIO'){
+    const check=await checkTwilioVerify(phone,code);
+    approved=check.approved;
+    if(!approved){
+      if(pool)await pool.query('UPDATE password_resets SET attempts=attempts+1 WHERE phone=$1',[phone]);
+      else{const m=memory.resets.get(phone);if(m)m.attempts+=1;}
+      return res.status(400).json({error:'رمز التحقق غير صحيح أو انتهت صلاحيته'});
+    }
+  }else{
+    approved=String(row.code)===code;
+    if(!approved){
+      if(pool)await pool.query('UPDATE password_resets SET attempts=attempts+1 WHERE phone=$1',[phone]);
+      else{const m=memory.resets.get(phone);if(m)m.attempts+=1;}
+      return res.status(400).json({error:'رمز التحقق غير صحيح'});
+    }
+  }
+
+  const hash=hashPassword(newPassword);
+  if(pool){
+    const r=await pool.query('UPDATE users SET password_hash=$1 WHERE phone=$2 RETURNING id',[hash,phone]);
+    if(!r.rows[0])return res.status(404).json({error:'رقم الهاتف غير مسجل'});
+    await pool.query('DELETE FROM sessions WHERE user_id=$1',[r.rows[0].id]);
+    await pool.query('DELETE FROM password_resets WHERE phone=$1',[phone]);
+  }else{
+    const found=[...memory.users.entries()].find(([,v])=>v.phone===phone);
+    if(!found)return res.status(404).json({error:'رقم الهاتف غير مسجل'});
+    memory.users.set(found[0],{...found[1],password_hash:hash});
+    for(const [t,uid] of [...memory.sessions.entries()])if(String(uid)===String(found[0]))memory.sessions.delete(t);
+    memory.resets.delete(phone);
+  }
+  res.json({ok:true,message:'تم تغيير كلمة المرور، يمكنك تسجيل الدخول الآن'});
+}catch(e){console.error(e);res.status(500).json({error:'تعذر تغيير كلمة المرور'});}});
+
 app.post('/api/auth/change-password',auth,async(req,res)=>{const current=String(req.body.currentPassword||''),next=String(req.body.newPassword||'');if(next.length<6)return res.status(400).json({error:'كلمة المرور الجديدة يجب أن تكون 6 أحرف على الأقل'});try{let row;if(pool)row=(await pool.query('SELECT * FROM users WHERE id=$1',[req.user.id])).rows[0];else row=[...memory.users.values()].find(u=>String(u.id)===String(req.user.id));if(!row||!verifyPassword(current,row.password_hash))return res.status(401).json({error:'كلمة المرور الحالية غير صحيحة'});const h=hashPassword(next);if(pool){await pool.query('UPDATE users SET password_hash=$1 WHERE id=$2',[h,req.user.id]);await pool.query('DELETE FROM sessions WHERE user_id=$1 AND token<>$2',[req.user.id,req.token]);}else{memory.users.set(req.user.id,{...row,password_hash:h});for(const [t,uid] of [...memory.sessions.entries()])if(String(uid)===String(req.user.id)&&t!==req.token)memory.sessions.delete(t);}res.json({ok:true,message:'تم تغيير كلمة المرور'});}catch(e){res.status(500).json({error:'تعذر تغيير كلمة المرور'});}});
 app.get('/api/auth/me',auth,(req,res)=>res.json({user:req.user}));
 app.post('/api/auth/logout',auth,async(req,res)=>{if(pool)await pool.query('DELETE FROM sessions WHERE token=$1',[req.token]);else memory.sessions.delete(req.token);res.json({ok:true});});
