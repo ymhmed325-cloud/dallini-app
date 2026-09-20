@@ -282,7 +282,24 @@ class ProfilePage extends StatelessWidget {
     return SafeArea(child:ListView(padding:const EdgeInsets.all(18),children:<Widget>[
       Card(child:ListTile(leading:const CircleAvatar(radius:28,child:Icon(Icons.person)),title:Text(_text(user['name'],'مستخدم'),style:const TextStyle(fontWeight:FontWeight.w900)),subtitle:Text(_text(user['phone'])))),
       const SizedBox(height:10),
-      ...entries.map((e)=>Card(child:ListTile(leading:Icon(e['i'] as IconData),title:Text(e['t'] as String,style:const TextStyle(fontWeight:FontWeight.w800)),trailing:const Icon(Icons.chevron_left),onTap:()=>Navigator.push(context,MaterialPageRoute(builder:(_)=>AccountFeaturePage(kind:e['t'] as String,user:user))))),
+      ...entries.map((e) => Card(
+        child: ListTile(
+          leading: Icon(e['i'] as IconData),
+          title: Text(e['t'] as String, style: const TextStyle(fontWeight: FontWeight.w800)),
+          trailing: const Icon(Icons.chevron_left),
+          onTap: () {
+            Navigator.push(
+              context,
+              MaterialPageRoute(
+                builder: (_) => AccountFeaturePage(
+                  kind: e['t'] as String,
+                  user: user,
+                ),
+              ),
+            );
+          },
+        ),
+      )),
       const SizedBox(height:16),
       FilledButton.tonalIcon(onPressed:onLogout,icon:const Icon(Icons.logout),label:const Text('تسجيل الخروج')),
     ]));
@@ -355,7 +372,7 @@ class _AccountFeaturePageState extends State<AccountFeaturePage>{
       const ExpansionTile(title:Text('كيف أقبل عرضاً؟'),children:<Widget>[Padding(padding:EdgeInsets.all(16),child:Text('افتح تفاصيل الطلب ثم اختر عرض الفني واضغط قبول.'))]),
       const SizedBox(height:18),FilledButton.icon(onPressed:support,icon:const Icon(Icons.support_agent),label:const Text('إرسال تذكرة دعم')),
     ]));
-    if(loading)return Scaffold(appBar:AppBar(title:Text(widget.kind)),body:const Center(child:CircularProgressIndicator());
+    if(loading)return Scaffold(appBar:AppBar(title:Text(widget.kind)),body:const Center(child:CircularProgressIndicator()));
     return Scaffold(appBar:AppBar(title:Text(widget.kind),actions:<Widget>[if(widget.kind=='العناوين')IconButton(onPressed:addAddress,icon:const Icon(Icons.add)),IconButton(onPressed:load,icon:const Icon(Icons.refresh))]),body:RefreshIndicator(onRefresh:load,child:ListView(padding:const EdgeInsets.all(16),children:items.isEmpty?<Widget>[const Padding(padding:EdgeInsets.all(40),child:Center(child:Text('لا توجد بيانات بعد.')))]:
       items.map((x){final id=_text(x['id']);final title=widget.kind=='العناوين'?_text(x['label'],'العنوان'):widget.kind=='الفنيون المفضلون'?_text(x['name'],'فني'):_text(x['title'],'دلّيني');final sub=widget.kind=='العناوين'?_text(x['address']):widget.kind=='الفنيون المفضلون'?_text(x['phone']):_text(x['message']);return Card(child:ListTile(leading:Icon(widget.kind=='الفنيون المفضلون'?Icons.engineering:widget.kind=='الإشعارات'?Icons.notifications:Icons.location_on),title:Text(title),subtitle:Text(sub),trailing:widget.kind=='الإشعارات'?null:IconButton(onPressed:()=>deleteItem(id),icon:Icon(widget.kind=='العناوين'?Icons.delete_outline:Icons.favorite,color:Colors.red)),onTap:widget.kind=='الإشعارات'?()=>markRead(id):null));}).toList())));
   }
