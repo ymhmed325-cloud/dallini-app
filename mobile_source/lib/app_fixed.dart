@@ -267,29 +267,98 @@ class MessagesPage extends StatelessWidget { const MessagesPage({super.key}); @o
 
 class ProfilePage extends StatelessWidget {
   const ProfilePage({super.key, required this.user, required this.onLogout});
-  final Map<String, dynamic> user; final Future<void> Function() onLogout;
+  final Map<String, dynamic> user;
+  final Future<void> Function() onLogout;
   @override Widget build(BuildContext context) {
-    final entries = <Map<String, dynamic>>[
-      {'title': 'تعديل الملف الشخصي', 'icon': Icons.edit_outlined, 'text': 'إدارة معلومات الحساب.'},
-      {'title': 'العناوين', 'icon': Icons.location_on_outlined, 'text': 'إدارة العناوين المحفوظة.'},
-      {'title': 'الإشعارات', 'icon': Icons.notifications_none, 'text': 'إعدادات إشعارات الطلبات والعروض.'},
-      {'title': 'الإعدادات', 'icon': Icons.settings_outlined, 'text': 'إعدادات التطبيق العامة.'},
-      {'title': 'الأمان والخصوصية', 'icon': Icons.security_outlined, 'text': 'خيارات حماية الحساب.'},
-      {'title': 'المساعدة', 'icon': Icons.help_outline, 'text': 'الأسئلة الشائعة والدعم.'},
+    final entries=<Map<String,dynamic>>[
+      {'t':'تعديل الملف الشخصي','i':Icons.edit_outlined},
+      {'t':'العناوين','i':Icons.location_on_outlined},
+      {'t':'الفنيون المفضلون','i':Icons.favorite_outline},
+      {'t':'الإشعارات','i':Icons.notifications_none},
+      {'t':'الإعدادات','i':Icons.settings_outlined},
+      {'t':'الأمان والخصوصية','i':Icons.security_outlined},
+      {'t':'المساعدة والدعم','i':Icons.help_outline},
     ];
-    return SafeArea(child: ListView(padding: const EdgeInsets.all(18), children: <Widget>[
-      Card(child: Padding(padding: const EdgeInsets.all(20), child: Row(children: <Widget>[const CircleAvatar(radius: 32, child: Icon(Icons.person, size: 34)), const SizedBox(width: 14), Expanded(child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: <Widget>[Text('${user['name'] ?? 'مستخدم'}', style: const TextStyle(fontSize: 20, fontWeight: FontWeight.w900)), const SizedBox(height: 4), Text('${user['phone'] ?? ''}')]))]))),
-      const SizedBox(height: 12),
-      ...entries.map((e) => Card(child: ListTile(leading: Icon(e['icon'] as IconData), title: Text(e['title'] as String, style: const TextStyle(fontWeight: FontWeight.w800)), subtitle: Text(e['text'] as String), trailing: const Icon(Icons.chevron_left), onTap: () { Navigator.push(context, MaterialPageRoute(builder: (_) => SimplePage(title: e['title'] as String, icon: e['icon'] as IconData, text: e['text'] as String))); }))),
-      const SizedBox(height: 16), FilledButton.tonalIcon(onPressed: onLogout, icon: const Icon(Icons.logout), label: const Text('تسجيل الخروج'))
+    return SafeArea(child:ListView(padding:const EdgeInsets.all(18),children:<Widget>[
+      Card(child:ListTile(leading:const CircleAvatar(radius:28,child:Icon(Icons.person)),title:Text(_text(user['name'],'مستخدم'),style:const TextStyle(fontWeight:FontWeight.w900)),subtitle:Text(_text(user['phone'])))),
+      const SizedBox(height:10),
+      ...entries.map((e)=>Card(child:ListTile(leading:Icon(e['i'] as IconData),title:Text(e['t'] as String,style:const TextStyle(fontWeight:FontWeight.w800)),trailing:const Icon(Icons.chevron_left),onTap:()=>Navigator.push(context,MaterialPageRoute(builder:(_)=>AccountFeaturePage(kind:e['t'] as String,user:user))))),
+      const SizedBox(height:16),
+      FilledButton.tonalIcon(onPressed:onLogout,icon:const Icon(Icons.logout),label:const Text('تسجيل الخروج')),
     ]));
   }
 }
 
-class SimplePage extends StatelessWidget {
-  const SimplePage({super.key, required this.title, required this.icon, required this.text});
-  final String title; final IconData icon; final String text;
-  @override Widget build(BuildContext context) { return Scaffold(appBar: AppBar(title: Text(title)), body: Center(child: Padding(padding: const EdgeInsets.all(28), child: Card(child: Padding(padding: const EdgeInsets.all(24), child: Column(mainAxisSize: MainAxisSize.min, children: <Widget>[CircleAvatar(radius: 36, child: Icon(icon, size: 36)), const SizedBox(height: 16), Text(title, style: const TextStyle(fontSize: 22, fontWeight: FontWeight.w900)), const SizedBox(height: 10), Text(text, textAlign: TextAlign.center)])))))); }
+class AccountFeaturePage extends StatefulWidget {
+  const AccountFeaturePage({super.key,required this.kind,required this.user});
+  final String kind; final Map<String,dynamic> user;
+  @override State<AccountFeaturePage> createState()=>_AccountFeaturePageState();
+}
+class _AccountFeaturePageState extends State<AccountFeaturePage>{
+  List<Map<String,dynamic>> items=<Map<String,dynamic>>[];
+  bool loading=true;
+  final name=TextEditingController(); final current=TextEditingController(); final next=TextEditingController();
+  @override void initState(){super.initState();name.text=_text(widget.user['name']);load();}
+  @override void dispose(){name.dispose();current.dispose();next.dispose();super.dispose();}
+  Future<String> token()async{final p=await SharedPreferences.getInstance();return p.getString('token')??'';}
+  Future<void> load()async{
+    if(widget.kind=='العناوين')await loadList('/api/addresses');
+    else if(widget.kind=='الفنيون المفضلون')await loadList('/api/favorites');
+    else if(widget.kind=='الإشعارات')await loadList('/api/notifications');
+    else if(mounted)setState(()=>loading=false);
+  }
+  Future<void> loadList(String path)async{
+    try{final r=await http.get(Uri.parse(apiUrl+path),headers:{'Authorization':'Bearer '+await token()});if(r.statusCode==200){final raw=jsonDecode(r.body);if(raw is List)items=raw.map((e)=>Map<String,dynamic>.from(e as Map)).toList();}}
+    catch(_){}
+    if(mounted)setState(()=>loading=false);
+  }
+  Future<void> saveProfile()async{
+    try{final r=await http.put(Uri.parse(apiUrl+'/api/profile'),headers:{'Authorization':'Bearer '+await token(),'Content-Type':'application/json'},body:jsonEncode({'name':name.text.trim()}));if(r.statusCode>=200&&r.statusCode<300){final raw=jsonDecode(r.body);if(raw is Map&&raw['user'] is Map){final p=await SharedPreferences.getInstance();await p.setString('user',jsonEncode(raw['user']));}if(mounted)ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content:Text('تم تحديث الملف الشخصي')));}}
+    catch(_){if(mounted)ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content:Text('تعذر الاتصال بالخادم')));}
+  }
+  Future<void> addAddress()async{
+    final label=TextEditingController(text:'المنزل');final address=TextEditingController();
+    await showDialog<void>(context:context,builder:(c)=>AlertDialog(title:const Text('إضافة عنوان'),content:Column(mainAxisSize:MainAxisSize.min,children:<Widget>[
+      TextField(controller:label,decoration:const InputDecoration(labelText:'اسم العنوان')),TextField(controller:address,maxLines:3,decoration:const InputDecoration(labelText:'العنوان')),
+    ]),actions:<Widget>[TextButton(onPressed:()=>Navigator.pop(c),child:const Text('إلغاء')),FilledButton(onPressed:()async{await http.post(Uri.parse(apiUrl+'/api/addresses'),headers:{'Authorization':'Bearer '+await token(),'Content-Type':'application/json'},body:jsonEncode({'label':label.text,'address':address.text,'isDefault':items.isEmpty}));if(c.mounted)Navigator.pop(c);await load();},child:const Text('حفظ'))]));
+    label.dispose();address.dispose();
+  }
+  Future<void> deleteItem(String id)async{
+    final path=widget.kind=='العناوين'?'/api/addresses/'+id:'/api/favorites/'+id;
+    await http.delete(Uri.parse(apiUrl+path),headers:{'Authorization':'Bearer '+await token()});await load();
+  }
+  Future<void> markRead(String id)async{await http.patch(Uri.parse(apiUrl+'/api/notifications/'+id+'/read'),headers:{'Authorization':'Bearer '+await token()});await load();}
+  Future<void> changePassword()async{
+    try{final r=await http.post(Uri.parse(apiUrl+'/api/auth/change-password'),headers:{'Authorization':'Bearer '+await token(),'Content-Type':'application/json'},body:jsonEncode({'currentPassword':current.text,'newPassword':next.text}));if(mounted)ScaffoldMessenger.of(context).showSnackBar(SnackBar(content:Text(r.statusCode>=200&&r.statusCode<300?'تم تغيير كلمة المرور':'تعذر تغيير كلمة المرور')));}
+    catch(_){}
+  }
+  Future<void> support()async{
+    final subject=TextEditingController();final message=TextEditingController();
+    await showDialog<void>(context:context,builder:(c)=>AlertDialog(title:const Text('تذكرة دعم'),content:Column(mainAxisSize:MainAxisSize.min,children:<Widget>[TextField(controller:subject,decoration:const InputDecoration(labelText:'الموضوع')),TextField(controller:message,maxLines:5,decoration:const InputDecoration(labelText:'التفاصيل'))]),actions:<Widget>[TextButton(onPressed:()=>Navigator.pop(c),child:const Text('إلغاء')),FilledButton(onPressed:()async{await http.post(Uri.parse(apiUrl+'/api/support/tickets'),headers:{'Authorization':'Bearer '+await token(),'Content-Type':'application/json'},body:jsonEncode({'subject':subject.text,'message':message.text}));if(c.mounted)Navigator.pop(c);},child:const Text('إرسال'))]));
+    subject.dispose();message.dispose();
+  }
+  @override Widget build(BuildContext context){
+    if(widget.kind=='تعديل الملف الشخصي')return Scaffold(appBar:AppBar(title:Text(widget.kind)),body:ListView(padding:const EdgeInsets.all(18),children:<Widget>[
+      TextField(controller:name,decoration:const InputDecoration(labelText:'الاسم الكامل',border:OutlineInputBorder())),const SizedBox(height:12),
+      Text('رقم الهاتف: '+_text(widget.user['phone']),style:const TextStyle(color:Colors.grey)),const SizedBox(height:20),
+      FilledButton(onPressed:saveProfile,child:const Text('حفظ التغييرات')),
+    ]));
+    if(widget.kind=='الأمان والخصوصية')return Scaffold(appBar:AppBar(title:Text(widget.kind)),body:ListView(padding:const EdgeInsets.all(18),children:<Widget>[
+      TextField(controller:current,obscureText:true,decoration:const InputDecoration(labelText:'كلمة المرور الحالية',border:OutlineInputBorder())),const SizedBox(height:12),
+      TextField(controller:next,obscureText:true,decoration:const InputDecoration(labelText:'كلمة المرور الجديدة',border:OutlineInputBorder())),const SizedBox(height:18),
+      FilledButton(onPressed:changePassword,child:const Text('تغيير كلمة المرور')),const SizedBox(height:18),
+      const Text('يحمي الخادم الطلبات والمحادثات بصلاحيات مرتبطة بالحساب.',style:TextStyle(color:Colors.grey)),
+    ]));
+    if(widget.kind=='الإعدادات')return Scaffold(appBar:AppBar(title:Text(widget.kind)),body:SwitchListTile(value:true,onChanged:(_){},title:const Text('إشعارات التطبيق'),subtitle:const Text('تنبيهات الطلبات والرسائل')));
+    if(widget.kind=='المساعدة والدعم')return Scaffold(appBar:AppBar(title:Text(widget.kind)),body:ListView(padding:const EdgeInsets.all(18),children:<Widget>[
+      const ExpansionTile(title:Text('كيف أنشئ طلباً؟'),children:<Widget>[Padding(padding:EdgeInsets.all(16),child:Text('اختر الخدمة واكتب المشكلة والعنوان ثم أرسل الطلب.'))]),
+      const ExpansionTile(title:Text('كيف أقبل عرضاً؟'),children:<Widget>[Padding(padding:EdgeInsets.all(16),child:Text('افتح تفاصيل الطلب ثم اختر عرض الفني واضغط قبول.'))]),
+      const SizedBox(height:18),FilledButton.icon(onPressed:support,icon:const Icon(Icons.support_agent),label:const Text('إرسال تذكرة دعم')),
+    ]));
+    if(loading)return Scaffold(appBar:AppBar(title:Text(widget.kind)),body:const Center(child:CircularProgressIndicator());
+    return Scaffold(appBar:AppBar(title:Text(widget.kind),actions:<Widget>[if(widget.kind=='العناوين')IconButton(onPressed:addAddress,icon:const Icon(Icons.add)),IconButton(onPressed:load,icon:const Icon(Icons.refresh))]),body:RefreshIndicator(onRefresh:load,child:ListView(padding:const EdgeInsets.all(16),children:items.isEmpty?<Widget>[const Padding(padding:EdgeInsets.all(40),child:Center(child:Text('لا توجد بيانات بعد.')))]:
+      items.map((x){final id=_text(x['id']);final title=widget.kind=='العناوين'?_text(x['label'],'العنوان'):widget.kind=='الفنيون المفضلون'?_text(x['name'],'فني'):_text(x['title'],'دلّيني');final sub=widget.kind=='العناوين'?_text(x['address']):widget.kind=='الفنيون المفضلون'?_text(x['phone']):_text(x['message']);return Card(child:ListTile(leading:Icon(widget.kind=='الفنيون المفضلون'?Icons.engineering:widget.kind=='الإشعارات'?Icons.notifications:Icons.location_on),title:Text(title),subtitle:Text(sub),trailing:widget.kind=='الإشعارات'?null:IconButton(onPressed:()=>deleteItem(id),icon:Icon(widget.kind=='العناوين'?Icons.delete_outline:Icons.favorite,color:Colors.red)),onTap:widget.kind=='الإشعارات'?()=>markRead(id):null));}).toList())));
+  }
 }
 
 String statusLabel(String? s) {
