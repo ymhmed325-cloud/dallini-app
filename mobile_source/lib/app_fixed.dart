@@ -140,15 +140,16 @@ class MainShell extends StatefulWidget {
 }
 class _MainShellState extends State<MainShell> {
   int index = 0;
-  Future<void> openNew([String? service]) async { await Navigator.push(context, MaterialPageRoute(builder: (_) => NewRequestPage(service: service))); if (mounted) setState(() {}); }
+  int ordersRefresh = 0;
+  Future<void> openNew([String? service]) async { await Navigator.push(context, MaterialPageRoute(builder: (_) => NewRequestPage(service: service))); if (mounted) setState(() { ordersRefresh++; }); }
   @override Widget build(BuildContext context) {
     final isProvider = widget.user['role'] == 'provider';
     if (isProvider) {
       final pages = <Widget>[const ProviderJobsPage(), ProfilePage(user: widget.user, onLogout: widget.onLogout)];
       return Scaffold(body: IndexedStack(index: index, children: pages), bottomNavigationBar: NavigationBar(selectedIndex: index, onDestinationSelected: (i) { setState(() { index = i; }); }, destinations: const <NavigationDestination>[NavigationDestination(icon: Icon(Icons.work_outline), label: 'الطلبات'), NavigationDestination(icon: Icon(Icons.person_outline), label: 'حسابي')]));
     }
-    final pages = <Widget>[HomePage(onNew: openNew), const OrdersPage(), const SizedBox.shrink(), const MessagesPage(), ProfilePage(user: widget.user, onLogout: widget.onLogout)];
-    return Scaffold(body: IndexedStack(index: index, children: pages), bottomNavigationBar: NavigationBar(selectedIndex: index, onDestinationSelected: (i) { if (i == 2) { openNew(); } else { setState(() { index = i; }); } }, destinations: const <NavigationDestination>[NavigationDestination(icon: Icon(Icons.home_outlined), label: 'الرئيسية'), NavigationDestination(icon: Icon(Icons.receipt_long_outlined), label: 'طلباتي'), NavigationDestination(icon: Icon(Icons.add_circle_outline), label: 'طلب جديد'), NavigationDestination(icon: Icon(Icons.chat_outlined), label: 'المحادثات'), NavigationDestination(icon: Icon(Icons.person_outline), label: 'حسابي')]));
+    final pages = <Widget>[HomePage(onNew: openNew), OrdersPage(key: ValueKey('orders-$ordersRefresh')), const SizedBox.shrink(), const MessagesPage(), ProfilePage(user: widget.user, onLogout: widget.onLogout)];
+    return Scaffold(body: IndexedStack(index: index, children: pages), bottomNavigationBar: NavigationBar(selectedIndex: index, onDestinationSelected: (i) { if (i == 2) { openNew(); } else { setState(() { if (i == 1) ordersRefresh++; index = i; }); } }, destinations: const <NavigationDestination>[NavigationDestination(icon: Icon(Icons.home_outlined), label: 'الرئيسية'), NavigationDestination(icon: Icon(Icons.receipt_long_outlined), label: 'طلباتي'), NavigationDestination(icon: Icon(Icons.add_circle_outline), label: 'طلب جديد'), NavigationDestination(icon: Icon(Icons.chat_outlined), label: 'المحادثات'), NavigationDestination(icon: Icon(Icons.person_outline), label: 'حسابي')]));
   }
 }
 
