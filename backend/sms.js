@@ -31,16 +31,12 @@ function normalizeTwilioPhone(v) {
 }
 
 async function sendTwilioVerify(phone, text) {
-  // دلّيني يولّد الرمز محلياً حالياً؛ نمرره إلى Verify عبر CustomCode.
-  // يجب تفعيل Enable Custom Verification Code في إعدادات خدمة Verify.
-  const match = String(text || '').match(/\b(\d{6})\b/);
-  if (!match) return { sent: false, gateway: 'twilio-verify', reason: 'verification-code-not-found' };
-
+  // استخدم رمز Twilio Verify المُدار من Twilio بدلاً من CustomCode.
+  // هذا يتجنب فشل الإرسال عندما لا تكون ميزة CustomCode مفعّلة في خدمة Verify.
   const url = `https://verify.twilio.com/v2/Services/${VERIFY_SERVICE_SID}/Verifications`;
   const body = new URLSearchParams({
     To: normalizeTwilioPhone(phone),
     Channel: 'sms',
-    CustomCode: match[1],
   });
   const r = await fetch(url, {
     method: 'POST',
@@ -63,6 +59,28 @@ async function sendTwilioVerify(phone, text) {
   return { sent: true, gateway: 'twilio-verify', id: data.sid, status: data.status };
 }
 
+async function checkTwilioVerify(phone, code) {
+  if (!VERIFY_SERVICE_SID || !TWILIO_READY) return { checked: false, approved: false, reason: 'twilio-verify-not-configured' };
+  const url = `https://verify.twilio.com/v2/Services/${VERIFY_SERVICE_SID}/VerificationCheck`;
+  const body = new URLSearchParams({
+    To: normalizeTwilioPhone(phone),
+    Code: String(code || '').trim(),
+  });
+  const r = await fetch(url, {
+    method: 'POST',
+    headers: {
+      Authorization: twilioAuthHeader(),
+      'Content-Type': 'application/x-www-form-urlencoded',
+    },
+    body,
+  });
+  const data = await r.json().catch(() => ({}));
+  if (!r.ok) {
+    console.error('[SMS:twilio-verify-check] failed', r.status, data);
+    return { checked: true, approved: false, reason: data.message || data.detail || `http-${r.status}`, code: data.code };
+  }
+  return { checked: true, approved: data.status === 'approved', status: data.status, reason: data.status };
+}
 async function sendSms(phone, text) {
   if (!GATEWAY) {
     console.log(`[SMS:console] to=${phone} :: ${text}`);
@@ -125,4 +143,4 @@ async function sendSms(phone, text) {
   }
 }
 
-module.exports = { sendSms, gatewayName, isConfigured };
+module.exports = { sendSms, checkTwilioVerify, gatewayName, isConfigured };
