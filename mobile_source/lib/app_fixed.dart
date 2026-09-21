@@ -12,6 +12,8 @@ const List<IconData> serviceIcons = <IconData>[Icons.bolt, Icons.water_drop, Ico
 const List<Color> serviceColors = <Color>[Colors.amber, Colors.blue, Colors.cyan, Colors.deepPurple, Colors.green, Colors.red];
 
 /// تخزين آمن للتوكن وبيانات الحساب (Android Keystore) بدل SharedPreferences النصية.
+bool _validEmail(String v) => RegExp(r'^[^\s@]+@[^\s@]+\.[^\s@]{2,}$').hasMatch(v.trim());
+
 class AuthStore {
   static const FlutterSecureStorage _s = FlutterSecureStorage(aOptions: AndroidOptions(encryptedSharedPreferences: true));
   static Future<String> token() async => (await _s.read(key: 'token')) ?? '';
@@ -95,21 +97,23 @@ class LoginPage extends StatefulWidget {
   @override State<LoginPage> createState() => _LoginPageState();
 }
 class _LoginPageState extends State<LoginPage> {
+  final email = TextEditingController();
   final phone = TextEditingController();
   final password = TextEditingController();
   final name = TextEditingController();
   bool register = false;
   bool busy = false;
   String role = 'customer';
-  @override void dispose() { phone.dispose(); password.dispose(); name.dispose(); super.dispose(); }
+  @override void dispose() { email.dispose(); phone.dispose(); password.dispose(); name.dispose(); super.dispose(); }
   void message(String s) { ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text(s))); }
   Future<void> submit() async {
-    if (phone.text.trim().length < 9 || password.text.length < 6) { message('أدخل رقم هاتف صحيح وكلمة مرور من 6 أحرف على الأقل'); return; }
+    if (!_validEmail(email.text) || password.text.length < 6) { message('أدخل بريداً إلكترونياً صحيحاً وكلمة مرور من 6 أحرف على الأقل'); return; }
+    if (register && phone.text.trim().isNotEmpty && phone.text.trim().length < 9) { message('رقم الهاتف غير صحيح (أو اتركه فارغاً)'); return; }
     if (register && name.text.trim().length < 2) { message('أدخل الاسم الكامل'); return; }
     setState(() { busy = true; });
     final endpoint = register ? 'register' : 'login';
     final uri = Uri.parse('$apiUrl/api/auth/$endpoint');
-    final payload = jsonEncode({'name': name.text.trim(), 'phone': phone.text.trim(), 'password': password.text, 'role': role});
+    final payload = jsonEncode(<String, dynamic>{'name': name.text.trim(), 'email': email.text.trim(), if (register && phone.text.trim().isNotEmpty) 'phone': phone.text.trim(), 'password': password.text, 'role': role});
     http.Response? response;
     Object? lastError;
     for (int attempt = 1; attempt <= 3; attempt++) {
@@ -148,7 +152,9 @@ class _LoginPageState extends State<LoginPage> {
       const SizedBox(height: 18), Text(register ? 'إنشاء حساب' : 'تسجيل الدخول', style: const TextStyle(fontSize: 23, fontWeight: FontWeight.w900)), const SizedBox(height: 18),
       if (register) TextField(controller: name, decoration: const InputDecoration(labelText: 'الاسم الكامل', border: OutlineInputBorder())),
       if (register) const SizedBox(height: 12),
-      TextField(controller: phone, keyboardType: TextInputType.phone, decoration: const InputDecoration(labelText: 'رقم الهاتف', border: OutlineInputBorder())), const SizedBox(height: 12),
+      TextField(controller: email, keyboardType: TextInputType.emailAddress, autocorrect: false, decoration: const InputDecoration(labelText: 'البريد الإلكتروني', border: OutlineInputBorder())), const SizedBox(height: 12),
+      if (register) TextField(controller: phone, keyboardType: TextInputType.phone, decoration: const InputDecoration(labelText: 'رقم الهاتف (اختياري)', border: OutlineInputBorder())),
+      if (register) const SizedBox(height: 12),
       TextField(controller: password, obscureText: true, decoration: const InputDecoration(labelText: 'كلمة المرور', border: OutlineInputBorder())),
       if (register) const SizedBox(height: 12),
       if (register) DropdownButtonFormField<String>(initialValue: role, decoration: const InputDecoration(labelText: 'نوع الحساب', border: OutlineInputBorder()), items: const <DropdownMenuItem<String>>[DropdownMenuItem<String>(value: 'customer', child: Text('مستخدم / طالب خدمة')), DropdownMenuItem<String>(value: 'provider', child: Text('فني / مقدم خدمة'))], onChanged: (v) { if (v != null) setState(() { role = v; }); }),
@@ -258,36 +264,73 @@ class _OrdersPageState extends State<OrdersPage> {
 class RequestDetailPage extends StatefulWidget { const RequestDetailPage({super.key, required this.request}); final Map<String, dynamic> request; @override State<RequestDetailPage> createState() => _RequestDetailPageState(); }
 class _RequestDetailPageState extends State<RequestDetailPage> {
   late Map<String, dynamic> request;
+  List<Map<String, dynamic>> offers = <Map<String, dynamic>>[];
   bool busy = false;
-  @override void initState() { super.initState(); request = Map<String, dynamic>.from(widget.request); }
+  bool loadingOffers = false;
+  @override void initState() { super.initState(); request = Map<String, dynamic>.from(widget.request); loadOffers(); }
+  Future<void> loadOffers() async {
+    final id = request['id']; if (id == null) return;
+    if (mounted) setState(() { loadingOffers = true; });
+    final token = await AuthStore.token();
+    try {
+      final r = await http.get(Uri.parse('$apiUrl/api/requests/${id}/offers'), headers: {'Authorization': 'Bearer $token'}).timeout(const Duration(seconds: 60));
+      if (r.statusCode == 200) {
+        final raw = jsonDecode(r.body);
+        if (raw is List) offers = raw.map((e) => Map<String, dynamic>.from(e as Map)).toList();
+      }
+    } catch (_) {}
+    if (mounted) setState(() { loadingOffers = false; });
+  }
   Future<void> nextStatus() async {
     final id = request['id']; if (id == null) return;
-    final token = await AuthStore.token();
-    setState(() { busy = true; });
+    final token = await AuthStore.token(); setState(() { busy = true; });
     try {
-      final r = await http.get(Uri.parse('$apiUrl/api/requests/$id'), headers: {'Authorization': 'Bearer $token'}).timeout(const Duration(seconds: 60));
-      if (r.statusCode >= 200 && r.statusCode < 300) { final raw = jsonDecode(r.body); if (raw is Map) setState(() { request = <String, dynamic>{...request, ...Map<String, dynamic>.from(raw)}; }); }
+      final r = await http.get(Uri.parse('$apiUrl/api/requests/${id}'), headers: {'Authorization': 'Bearer $token'}).timeout(const Duration(seconds: 60));
+      if (r.statusCode >= 200 && r.statusCode < 300) {
+        final raw = jsonDecode(r.body);
+        if (raw is Map) setState(() { request = <String, dynamic>{...request, ...Map<String, dynamic>.from(raw)}; });
+        await loadOffers();
+      }
     } catch (_) {}
     if (mounted) setState(() { busy = false; });
   }
   Future<void> acceptOffer(dynamic offerId) async {
-    final token = await AuthStore.token();
-    setState(() { busy = true; });
+    final token = await AuthStore.token(); setState(() { busy = true; });
     try {
       final r = await http.post(Uri.parse('$apiUrl/api/requests/${request['id']}/accept-offer'), headers: {'Authorization': 'Bearer $token', 'Content-Type': 'application/json'}, body: jsonEncode({'providerId': offerId}));
-      if (r.statusCode >= 200 && r.statusCode < 300) { final raw = jsonDecode(r.body); if (raw is Map && raw['request'] is Map) setState(() { request = Map<String, dynamic>.from(raw['request'] as Map); }); }
+      if (r.statusCode >= 200 && r.statusCode < 300) {
+        final raw = jsonDecode(r.body);
+        if (raw is Map && raw['request'] is Map) setState(() { request = Map<String, dynamic>.from(raw['request'] as Map); });
+        await loadOffers();
+      }
     } catch (_) {}
     if (mounted) setState(() { busy = false; });
   }
   @override Widget build(BuildContext context) {
-    final rawOffers = request['offers'];
-    final offers = rawOffers is List ? rawOffers : <dynamic>[];
-    return Scaffold(appBar: AppBar(title: const Text('تفاصيل الطلب')), body: ListView(padding: const EdgeInsets.all(18), children: <Widget>[
-      Card(child: Padding(padding: const EdgeInsets.all(18), child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: <Widget>[Text('${request['category']}', style: const TextStyle(fontSize: 24, fontWeight: FontWeight.w900)), const SizedBox(height: 10), Text('${request['description']}'), const SizedBox(height: 10), Text('الحالة: ${request['status']}'), const SizedBox(height: 8), Text('العنوان: ${request['address'] ?? '-'}')]))) ,
-      if (offers.isNotEmpty) const Padding(padding: EdgeInsets.only(top: 14, bottom: 8), child: Text('العروض', style: TextStyle(fontSize: 20, fontWeight: FontWeight.w900))),
-      ...offers.map((raw) { final o = Map<String, dynamic>.from(raw as Map); return Card(child: ListTile(leading: const CircleAvatar(child: Icon(Icons.engineering)), title: Text('${o['providerName'] ?? 'فني'}'), subtitle: Text('السعر: ${o['price'] ?? '-'}\nالوصول: ${o['etaMinutes'] ?? '-'} دقيقة'), isThreeLine: true, trailing: FilledButton(onPressed: busy ? null : () { acceptOffer(o['provider_id'] ?? o['id']); }, child: const Text('قبول')))); }),
-      const SizedBox(height: 14), SizedBox(height: 50, child: OutlinedButton.icon(onPressed: busy ? null : nextStatus, icon: const Icon(Icons.refresh), label: const Text('تحديث حالة الطلب')))
-    ]));
+    return Scaffold(appBar: AppBar(title: const Text('تفاصيل الطلب')), body: RefreshIndicator(
+      onRefresh: loadOffers,
+      child: ListView(padding: const EdgeInsets.all(18), children: <Widget>[
+        Card(child: Padding(padding: const EdgeInsets.all(18), child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: <Widget>[
+          Text('${request['category']}', style: const TextStyle(fontSize: 24, fontWeight: FontWeight.w900)),
+          const SizedBox(height: 10), Text('${request['description']}'), const SizedBox(height: 10),
+          Text('الحالة: ${request['status']}'), const SizedBox(height: 8), Text('العنوان: ${request['address'] ?? '-'}')
+        ]))),
+        if (loadingOffers) const Padding(padding: EdgeInsets.all(20), child: Center(child: CircularProgressIndicator())),
+        if (!loadingOffers && offers.isNotEmpty) const Padding(padding: EdgeInsets.only(top: 14, bottom: 8), child: Text('العروض', style: TextStyle(fontSize: 20, fontWeight: FontWeight.w900))),
+        ...offers.map((o) {
+          final providerName = o['providerName'] ?? o['name'] ?? 'فني';
+          final eta = o['etaMinutes'] ?? o['eta'] ?? '-';
+          return Card(child: ListTile(
+            leading: const CircleAvatar(child: Icon(Icons.engineering)),
+            title: Text('$providerName'),
+            subtitle: Text('السعر: ${o['price'] ?? '-'}\nالوصول: $eta دقيقة'),
+            isThreeLine: true,
+            trailing: FilledButton(onPressed: busy ? null : () { acceptOffer(o['provider_id'] ?? o['id']); }, child: const Text('قبول'))
+          ));
+        }),
+        const SizedBox(height: 14), SizedBox(height: 50, child: OutlinedButton.icon(onPressed: busy ? null : nextStatus, icon: const Icon(Icons.refresh), label: const Text('تحديث حالة الطلب')))
+      ])
+    ));
   }
 }
 
@@ -308,7 +351,7 @@ class ProfilePage extends StatelessWidget {
       {'t':'المساعدة والدعم','i':Icons.help_outline},
     ];
     return SafeArea(child:ListView(padding:const EdgeInsets.all(18),children:<Widget>[
-      Card(child:ListTile(leading:const CircleAvatar(radius:28,child:Icon(Icons.person)),title:Text(_text(user['name'],'مستخدم'),style:const TextStyle(fontWeight:FontWeight.w900)),subtitle:Text(_text(user['phone'])))),
+      Card(child:ListTile(leading:const CircleAvatar(radius:28,child:Icon(Icons.person)),title:Text(_text(user['name'],'مستخدم'),style:const TextStyle(fontWeight:FontWeight.w900)),subtitle:Text(_text(user['email'],_text(user['phone']))))),
       const SizedBox(height:10),
       ...entries.map((e) => Card(
         child: ListTile(
@@ -385,7 +428,7 @@ class _AccountFeaturePageState extends State<AccountFeaturePage>{
   @override Widget build(BuildContext context){
     if(widget.kind=='تعديل الملف الشخصي')return Scaffold(appBar:AppBar(title:Text(widget.kind)),body:ListView(padding:const EdgeInsets.all(18),children:<Widget>[
       TextField(controller:name,decoration:const InputDecoration(labelText:'الاسم الكامل',border:OutlineInputBorder())),const SizedBox(height:12),
-      Text('رقم الهاتف: '+_text(widget.user['phone']),style:const TextStyle(color:Colors.grey)),const SizedBox(height:20),
+      Text('البريد الإلكتروني: '+_text(widget.user['email']),style:const TextStyle(color:Colors.grey)),const SizedBox(height:6),Text('رقم الهاتف: '+_text(widget.user['phone']),style:const TextStyle(color:Colors.grey)),const SizedBox(height:20),
       FilledButton(onPressed:saveProfile,child:const Text('حفظ التغييرات')),
     ]));
     if(widget.kind=='الأمان والخصوصية')return Scaffold(appBar:AppBar(title:Text(widget.kind)),body:ListView(padding:const EdgeInsets.all(18),children:<Widget>[
@@ -668,18 +711,67 @@ class _ProviderJobsPageState extends State<ProviderJobsPage> {
     if (mounted) setState(() { loading = false; });
   }
 
-  Future<void> accept(dynamic id) async {
-    final token = await _token();
+  Future<void> submitOffer(Map<String, dynamic> job) async {
+    final price = TextEditingController();
+    final eta = TextEditingController();
     try {
-      final r = await http.post(Uri.parse('$apiUrl/api/providers/requests/$id/accept'), headers: {'Authorization': 'Bearer $token'}).timeout(const Duration(seconds: 60));
-      if (r.statusCode >= 200 && r.statusCode < 300) {
-        if (mounted) ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content: Text('تم قبول الطلب، ستجده في تبويب طلباتي')));
-      } else {
-        final raw = jsonDecode(r.body);
-        final msg = raw is Map ? _text(raw['error'], 'تعذر قبول الطلب') : 'تعذر قبول الطلب';
-        if (mounted) ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text(msg)));
+      final result = await showDialog<bool>(
+        context: context,
+        builder: (dialogContext) => AlertDialog(
+          title: const Text('إرسال عرض للعميل'),
+          content: Column(
+            mainAxisSize: MainAxisSize.min,
+            children: <Widget>[
+              TextField(
+                controller: price,
+                keyboardType: TextInputType.number,
+                decoration: const InputDecoration(labelText: 'السعر بالدينار العراقي'),
+              ),
+              const SizedBox(height: 12),
+              TextField(
+                controller: eta,
+                decoration: const InputDecoration(labelText: 'وقت الوصول', hintText: 'مثال: 30 دقيقة'),
+              ),
+            ],
+          ),
+          actions: <Widget>[
+            TextButton(onPressed: () => Navigator.pop(dialogContext, false), child: const Text('إلغاء')),
+            FilledButton(
+              onPressed: () async {
+                final p = int.tryParse(price.text.trim());
+                if (p == null || p <= 0 || eta.text.trim().isEmpty) {
+                  ScaffoldMessenger.of(dialogContext).showSnackBar(const SnackBar(content: Text('أدخل السعر ووقت الوصول')));
+                  return;
+                }
+                try {
+                  final r = await http.post(
+                    Uri.parse('$apiUrl/api/requests/' + job['id'].toString() + '/offers'),
+                    headers: {'Authorization': 'Bearer ' + await _token(), 'Content-Type': 'application/json'},
+                    body: jsonEncode({'price': p, 'eta': eta.text.trim()}),
+                  ).timeout(const Duration(seconds: 60));
+                  final raw = jsonDecode(r.body);
+                  final data = raw is Map ? Map<String, dynamic>.from(raw) : <String, dynamic>{};
+                  if (r.statusCode >= 200 && r.statusCode < 300) {
+                    Navigator.pop(dialogContext, true);
+                  } else {
+                    ScaffoldMessenger.of(dialogContext).showSnackBar(SnackBar(content: Text(_text(data['error'], 'تعذر إرسال العرض'))));
+                  }
+                } catch (_) {
+                  ScaffoldMessenger.of(dialogContext).showSnackBar(const SnackBar(content: Text('تعذر الاتصال بالخادم')));
+                }
+              },
+              child: const Text('إرسال العرض'),
+            ),
+          ],
+        ),
+      );
+      if (result == true && mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content: Text('تم إرسال العرض للعميل')));
       }
-    } catch (_) { if (mounted) ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content: Text('تعذر الاتصال بالخادم'))); }
+    } finally {
+      price.dispose();
+      eta.dispose();
+    }
     await load();
   }
 
@@ -698,7 +790,7 @@ class _ProviderJobsPageState extends State<ProviderJobsPage> {
       isThreeLine: true,
       trailing: assignedJob
         ? const Icon(Icons.chevron_left)
-        : FilledButton(onPressed: () { accept(job['id']); }, child: const Text('قبول')),
+        : FilledButton(onPressed: () { submitOffer(job); }, child: const Text('إرسال عرض')),
       onTap: assignedJob ? () { Navigator.push(context, MaterialPageRoute(builder: (_) => ProviderJobDetailPage(job: job))).then((_) { load(); }); } : null,
     ));
   }
@@ -729,13 +821,13 @@ class ForgotPasswordPage extends StatefulWidget {
 }
 
 class _ForgotPasswordPageState extends State<ForgotPasswordPage> {
-  final phone = TextEditingController();
+  final email = TextEditingController();
   final code = TextEditingController();
   final password = TextEditingController();
   bool busy = false;
   bool sent = false;
 
-  @override void dispose() { phone.dispose(); code.dispose(); password.dispose(); super.dispose(); }
+  @override void dispose() { email.dispose(); code.dispose(); password.dispose(); super.dispose(); }
 
   void message(String s) { if (mounted) ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text(s))); }
 
@@ -755,9 +847,9 @@ class _ForgotPasswordPageState extends State<ForgotPasswordPage> {
   }
 
   Future<void> sendCode() async {
-    if (phone.text.trim().length < 9) { message('أدخل رقم هاتف صحيح'); return; }
+    if (!_validEmail(email.text)) { message('أدخل بريداً إلكترونياً صحيحاً'); return; }
     setState(() { busy = true; });
-    final data = await call('forgot-password', {'phone': phone.text.trim()});
+    final data = await call('forgot-password', {'email': email.text.trim()});
     if (!mounted) return;
     setState(() { busy = false; if (data != null) sent = true; });
     if (data != null) {
@@ -770,7 +862,7 @@ class _ForgotPasswordPageState extends State<ForgotPasswordPage> {
     if (code.text.trim().length != 6) { message('أدخل رمز التحقق المكوّن من 6 أرقام'); return; }
     if (password.text.length < 6) { message('كلمة المرور يجب أن تكون 6 أحرف على الأقل'); return; }
     setState(() { busy = true; });
-    final data = await call('reset-password', {'phone': phone.text.trim(), 'code': code.text.trim(), 'newPassword': password.text});
+    final data = await call('reset-password', {'email': email.text.trim(), 'code': code.text.trim(), 'newPassword': password.text});
     if (!mounted) return;
     setState(() { busy = false; });
     if (data != null) {
@@ -787,11 +879,11 @@ class _ForgotPasswordPageState extends State<ForgotPasswordPage> {
     return Scaffold(
       appBar: AppBar(title: const Text('استرجاع كلمة المرور')),
       body: SafeArea(child: SingleChildScrollView(padding: const EdgeInsets.all(20), child: Column(crossAxisAlignment: CrossAxisAlignment.stretch, children: <Widget>[
-        const Text('أدخل رقم هاتفك المسجّل، ثم رمز التحقق، ثم كلمة المرور الجديدة.', style: TextStyle(fontSize: 15, color: Color(0xFF55606E))),
+        const Text('أدخل بريدك الإلكتروني المسجّل، ثم الرمز الذي وصلك على بريدك، ثم كلمة المرور الجديدة.', style: TextStyle(fontSize: 15, color: Color(0xFF55606E))),
         const SizedBox(height: 18),
-        TextField(controller: phone, keyboardType: TextInputType.phone, decoration: const InputDecoration(labelText: 'رقم الهاتف', border: OutlineInputBorder())),
+        TextField(controller: email, keyboardType: TextInputType.emailAddress, autocorrect: false, decoration: const InputDecoration(labelText: 'البريد الإلكتروني', border: OutlineInputBorder())),
         const SizedBox(height: 12),
-        FilledButton.icon(onPressed: busy ? null : sendCode, icon: const Icon(Icons.sms_outlined), label: Text(sent ? 'إعادة إرسال الرمز' : 'إرسال رمز التحقق')),
+        FilledButton.icon(onPressed: busy ? null : sendCode, icon: const Icon(Icons.email_outlined), label: Text(sent ? 'إعادة إرسال الرمز' : 'إرسال رمز التحقق')),
         if (sent) ...<Widget>[
           const SizedBox(height: 18),
           TextField(controller: code, keyboardType: TextInputType.number, decoration: const InputDecoration(labelText: 'رمز التحقق (6 أرقام)', border: OutlineInputBorder())),

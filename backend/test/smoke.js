@@ -7,7 +7,7 @@ const assert = require('node:assert');
 
 const PORT = process.env.TEST_PORT || 10099;
 const BASE = `http://127.0.0.1:${PORT}`;
-const phone = '0770' + String(Date.now()).slice(-7);
+const email = `user${Date.now()}@example.com`;
 const password = 'secret123';
 const newPassword = 'newsecret456';
 
@@ -54,36 +54,36 @@ const post = (path, obj, token) => req(path, {
     const cats = await req('/api/categories');
     check('الفئات', cats.status === 200 && Array.isArray(cats.body) && cats.body.length >= 6);
 
-    const reg = await post('/api/auth/register', { name: 'مستخدم اختبار', phone, password, role: 'customer' });
+    const reg = await post('/api/auth/register', { name: 'مستخدم اختبار', email, password, role: 'customer' });
     check('إنشاء حساب', reg.status === 201 && !!reg.body.token, JSON.stringify(reg.body));
     const token = reg.body.token;
 
-    const dup = await post('/api/auth/register', { name: 'مكرر', phone, password, role: 'customer' });
-    check('رفض رقم مكرر', dup.status === 409);
+    const dup = await post('/api/auth/register', { name: 'مكرر', email, password, role: 'customer' });
+    check('رفض بريد مكرر', dup.status === 409);
 
-    const login = await post('/api/auth/login', { phone, password });
+    const login = await post('/api/auth/login', { email, password });
     check('تسجيل الدخول', login.status === 200 && !!login.body.token);
 
     const me = await req('/api/auth/me', { headers: { Authorization: `Bearer ${token}` } });
-    check('بيانات الحساب', me.status === 200 && me.body.user.phone === phone);
+    check('بيانات الحساب', me.status === 200 && me.body.user.email === email);
 
-    const forgot = await post('/api/auth/forgot-password', { phone });
+    const forgot = await post('/api/auth/forgot-password', { email });
     check('طلب رمز التحقق', forgot.status === 200 && String(forgot.body.devCode || '').length === 6, JSON.stringify(forgot.body));
     const code = String(forgot.body.devCode);
 
-    const forgotUnknown = await post('/api/auth/forgot-password', { phone: '07709999999' });
+    const forgotUnknown = await post('/api/auth/forgot-password', { email: 'nobody-here@example.com' });
     check('عدم كشف الأرقام غير المسجلة', forgotUnknown.status === 200 && !forgotUnknown.body.devCode);
 
-    const badReset = await post('/api/auth/reset-password', { phone, code: '000000', newPassword });
+    const badReset = await post('/api/auth/reset-password', { email, code: '000000', newPassword });
     check('رفض رمز خاطئ', badReset.status === 400);
 
-    const reset = await post('/api/auth/reset-password', { phone, code, newPassword });
+    const reset = await post('/api/auth/reset-password', { email, code, newPassword });
     check('تغيير كلمة المرور', reset.status === 200 && reset.body.ok === true, JSON.stringify(reset.body));
 
-    const oldLogin = await post('/api/auth/login', { phone, password });
+    const oldLogin = await post('/api/auth/login', { email, password });
     check('رفض كلمة المرور القديمة', oldLogin.status === 401);
 
-    const newLogin = await post('/api/auth/login', { phone, password: newPassword });
+    const newLogin = await post('/api/auth/login', { email, password: newPassword });
     check('الدخول بكلمة المرور الجديدة', newLogin.status === 200 && !!newLogin.body.token);
     const token2 = newLogin.body.token;
 
@@ -104,10 +104,26 @@ const post = (path, obj, token) => req(path, {
 
 
     // ---------- مسار الفني: قبول + تتبّع المراحل ----------
-    const pPhone = '0771' + String(Date.now()).slice(-7);
-    const preg = await post('/api/auth/register', { name: 'فني اختبار', phone: pPhone, password, role: 'provider' });
+    const pEmail = `provider${Date.now()}@example.com`;
+    const preg = await post('/api/auth/register', { name: 'فني اختبار', email: pEmail, password, role: 'provider' });
     check('إنشاء حساب فني', preg.status === 201 && !!preg.body.token, JSON.stringify(preg.body));
     const ptoken = preg.body.token;
+
+
+    // ---------- دورة العروض وحماية بيانات العميل ----------
+    const offerRequest = await post('/api/requests', { category: 'تكييف', description: 'أحتاج فني تكييف', address: 'بغداد - عنوان خاص', lat: 33.3, lng: 44.4 }, token2);
+    check('إنشاء طلب لدورة العروض', offerRequest.status === 201);
+    const offerReqId = offerRequest.body.id;
+    const availableBeforeOffer = await req('/api/providers/requests', { headers: { Authorization: `Bearer ${ptoken}` } });
+    const availableJob = Array.isArray(availableBeforeOffer.body) ? availableBeforeOffer.body.find(x => String(x.id) === String(offerReqId)) : null;
+    check('إخفاء بيانات العميل عن الطلب المتاح', !!availableJob && availableJob.address == null && availableJob.lat == null && availableJob.lng == null && availableJob.user_id == null);
+    const sentOffer = await post(`/api/requests/${offerReqId}/offers`, { price: 25000, eta: '30 دقيقة' }, ptoken);
+    check('الفني ينشئ عرضاً', sentOffer.status === 201 && sentOffer.body.offer && String(sentOffer.body.offer.provider_id) === String(preg.body.user.id));
+    const offersForCustomer = await req(`/api/requests/${offerReqId}/offers`, { headers: { Authorization: `Bearer ${token2}` } });
+    const visibleOffer = Array.isArray(offersForCustomer.body) ? offersForCustomer.body[0] : null;
+    check('العميل يرى العرض', offersForCustomer.status === 200 && !!visibleOffer && visibleOffer.providerName === 'فني اختبار' && Number(visibleOffer.price) === 25000 && String(visibleOffer.etaMinutes) === '30 دقيقة');
+    const acceptedOffer = await post(`/api/requests/${offerReqId}/accept-offer`, { providerId: preg.body.user.id }, token2);
+    check('العميل يقبل العرض', acceptedOffer.status === 200 && acceptedOffer.body.request.status === 'accepted' && String(acceptedOffer.body.request.provider_id) === String(preg.body.user.id));
 
     const open = await post('/api/requests', { category: 'سباكة', description: 'تسريب ماء في المطبخ', address: 'بغداد - الكرادة' }, token2);
     check('طلب جديد متاح للفنيين', open.status === 201);
@@ -142,14 +158,14 @@ const post = (path, obj, token) => req(path, {
     check('تتبّع الطلب للعميل', track.status === 200 && track.body.status === 'completed' && Array.isArray(track.body.events) && track.body.events.length >= 4, JSON.stringify(track.body).slice(0, 180));
     const trackProvider = await req(`/api/requests/${reqId}/timeline`, { headers: { Authorization: `Bearer ${ptoken}` } });
     check('تتبّع الطلب للفني', trackProvider.status === 200);
-    const stranger = await post('/api/auth/register', { name: 'غريب', phone: '0772' + String(Date.now()).slice(-7), password, role: 'customer' });
+    const stranger = await post('/api/auth/register', { name: 'غريب', email: `stranger${Date.now()}@example.com`, password, role: 'customer' });
     const trackStranger = await req(`/api/requests/${reqId}/timeline`, { headers: { Authorization: `Bearer ${stranger.body.token}` } });
     check('منع تتبّع طلب ليس لك', trackStranger.status === 403);
 
-    // بوابة SMS: الحالة الظاهرة في /api/health
+    // بوابة البريد: الحالة الظاهرة في /api/health
     const health2 = await req('/api/health');
-    check('حالة بوابة SMS معروضة', typeof health2.body.sms === 'string', JSON.stringify(health2.body));
-    console.log(`     (بوابة SMS الحالية: ${health2.body.sms} | resetDemo: ${health2.body.resetDemo})`);
+    check('حالة بوابة البريد معروضة', typeof health2.body.email === 'string', JSON.stringify(health2.body));
+    console.log(`     (بوابة البريد الحالية: ${health2.body.email} | resetDemo: ${health2.body.resetDemo})`);
 
     console.log(`\nالنتيجة: ${passed} اختباراً ناجحاً ✅`);
   } catch (e) {
