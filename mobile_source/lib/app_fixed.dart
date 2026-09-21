@@ -3,6 +3,7 @@ import 'dart:convert';
 import 'dart:io';
 import 'package:flutter/material.dart';
 import 'package:http/http.dart' as http;
+import 'package:flutter_secure_storage/flutter_secure_storage.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 
 const String apiUrl = String.fromEnvironment('API_URL', defaultValue: 'https://dallini-app.onrender.com');
@@ -10,7 +11,41 @@ const List<String> services = <String>['كهرباء', 'سباكة', 'تكييف
 const List<IconData> serviceIcons = <IconData>[Icons.bolt, Icons.water_drop, Icons.ac_unit, Icons.build, Icons.cleaning_services, Icons.directions_car];
 const List<Color> serviceColors = <Color>[Colors.amber, Colors.blue, Colors.cyan, Colors.deepPurple, Colors.green, Colors.red];
 
-void main() { runApp(const DalliniApp()); }
+/// تخزين آمن للتوكن وبيانات الحساب (Android Keystore) بدل SharedPreferences النصية.
+bool _validEmail(String v) => RegExp(r'^[^\s@]+@[^\s@]+\.[^\s@]{2,}$').hasMatch(v.trim());
+
+class AuthStore {
+  static const FlutterSecureStorage _s = FlutterSecureStorage(aOptions: AndroidOptions(encryptedSharedPreferences: true));
+  static Future<String> token() async => (await _s.read(key: 'token')) ?? '';
+  static Future<String?> userJson() => _s.read(key: 'user');
+  static Future<void> save(String token, String userJson) async {
+    await _s.write(key: 'token', value: token);
+    await _s.write(key: 'user', value: userJson);
+  }
+  static Future<void> saveUser(String userJson) => _s.write(key: 'user', value: userJson);
+  static Future<void> clear() async {
+    await _s.delete(key: 'token');
+    await _s.delete(key: 'user');
+  }
+  /// ترحيل لمرة واحدة: ينقل التوكن القديم من SharedPreferences ثم يحذفه منها.
+  static Future<void> migrateLegacy() async {
+    try {
+      final p = await SharedPreferences.getInstance();
+      final t = p.getString('token'), u = p.getString('user');
+      if (t != null && t.isNotEmpty && (await token()).isEmpty) {
+        await save(t, u ?? '{}');
+      }
+      await p.remove('token');
+      await p.remove('user');
+    } catch (_) {}
+  }
+}
+
+Future<void> main() async {
+  WidgetsFlutterBinding.ensureInitialized();
+  await AuthStore.migrateLegacy();
+  runApp(const DalliniApp());
+}
 
 class DalliniApp extends StatelessWidget {
   const DalliniApp({super.key});
@@ -34,8 +69,7 @@ class _RootPageState extends State<RootPage> {
   bool loading = true;
   @override void initState() { super.initState(); load(); }
   Future<void> load() async {
-    final p = await SharedPreferences.getInstance();
-    final raw = p.getString('user');
+    final raw = await AuthStore.userJson();
     Map<String, dynamic>? value;
     if (raw != null) {
       try { value = Map<String, dynamic>.from(jsonDecode(raw) as Map); } catch (_) {}
@@ -43,15 +77,11 @@ class _RootPageState extends State<RootPage> {
     if (mounted) setState(() { user = value; loading = false; });
   }
   Future<void> loginDone(String token, Map<String, dynamic> account) async {
-    final p = await SharedPreferences.getInstance();
-    await p.setString('token', token);
-    await p.setString('user', jsonEncode(account));
+    await AuthStore.save(token, jsonEncode(account));
     if (mounted) setState(() { user = account; });
   }
   Future<void> logout() async {
-    final p = await SharedPreferences.getInstance();
-    await p.remove('token');
-    await p.remove('user');
+    await AuthStore.clear();
     if (mounted) setState(() { user = null; });
   }
   @override Widget build(BuildContext context) {
@@ -67,21 +97,23 @@ class LoginPage extends StatefulWidget {
   @override State<LoginPage> createState() => _LoginPageState();
 }
 class _LoginPageState extends State<LoginPage> {
+  final email = TextEditingController();
   final phone = TextEditingController();
   final password = TextEditingController();
   final name = TextEditingController();
   bool register = false;
   bool busy = false;
   String role = 'customer';
-  @override void dispose() { phone.dispose(); password.dispose(); name.dispose(); super.dispose(); }
+  @override void dispose() { email.dispose(); phone.dispose(); password.dispose(); name.dispose(); super.dispose(); }
   void message(String s) { ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text(s))); }
   Future<void> submit() async {
-    if (phone.text.trim().length < 9 || password.text.length < 6) { message('أدخل رقم هاتف صحيح وكلمة مرور من 6 أحرف على الأقل'); return; }
+    if (!_validEmail(email.text) || password.text.length < 6) { message('أدخل بريداً إلكترونياً صحيحاً وكلمة مرور من 6 أحرف على الأقل'); return; }
+    if (register && phone.text.trim().isNotEmpty && phone.text.trim().length < 9) { message('رقم الهاتف غير صحيح (أو اتركه فارغاً)'); return; }
     if (register && name.text.trim().length < 2) { message('أدخل الاسم الكامل'); return; }
     setState(() { busy = true; });
     final endpoint = register ? 'register' : 'login';
     final uri = Uri.parse('$apiUrl/api/auth/$endpoint');
-    final payload = jsonEncode({'name': name.text.trim(), 'phone': phone.text.trim(), 'password': password.text, 'role': role});
+    final payload = jsonEncode(<String, dynamic>{'name': name.text.trim(), 'email': email.text.trim(), if (register && phone.text.trim().isNotEmpty) 'phone': phone.text.trim(), 'password': password.text, 'role': role});
     http.Response? response;
     Object? lastError;
     for (int attempt = 1; attempt <= 3; attempt++) {
@@ -120,7 +152,9 @@ class _LoginPageState extends State<LoginPage> {
       const SizedBox(height: 18), Text(register ? 'إنشاء حساب' : 'تسجيل الدخول', style: const TextStyle(fontSize: 23, fontWeight: FontWeight.w900)), const SizedBox(height: 18),
       if (register) TextField(controller: name, decoration: const InputDecoration(labelText: 'الاسم الكامل', border: OutlineInputBorder())),
       if (register) const SizedBox(height: 12),
-      TextField(controller: phone, keyboardType: TextInputType.phone, decoration: const InputDecoration(labelText: 'رقم الهاتف', border: OutlineInputBorder())), const SizedBox(height: 12),
+      TextField(controller: email, keyboardType: TextInputType.emailAddress, autocorrect: false, decoration: const InputDecoration(labelText: 'البريد الإلكتروني', border: OutlineInputBorder())), const SizedBox(height: 12),
+      if (register) TextField(controller: phone, keyboardType: TextInputType.phone, decoration: const InputDecoration(labelText: 'رقم الهاتف (اختياري)', border: OutlineInputBorder())),
+      if (register) const SizedBox(height: 12),
       TextField(controller: password, obscureText: true, decoration: const InputDecoration(labelText: 'كلمة المرور', border: OutlineInputBorder())),
       if (register) const SizedBox(height: 12),
       if (register) DropdownButtonFormField<String>(initialValue: role, decoration: const InputDecoration(labelText: 'نوع الحساب', border: OutlineInputBorder()), items: const <DropdownMenuItem<String>>[DropdownMenuItem<String>(value: 'customer', child: Text('مستخدم / طالب خدمة')), DropdownMenuItem<String>(value: 'provider', child: Text('فني / مقدم خدمة'))], onChanged: (v) { if (v != null) setState(() { role = v; }); }),
@@ -182,8 +216,7 @@ class _NewRequestPageState extends State<NewRequestPage> {
   Future<void> send() async {
     if (service == null) { message('اختر نوع الخدمة'); return; }
     if (desc.text.trim().length < 3) { message('اكتب وصف المشكلة'); return; }
-    final p = await SharedPreferences.getInstance();
-    final token = p.getString('token') ?? '';
+    final token = await AuthStore.token();
     if (token.isEmpty) { message('سجّل الدخول مرة أخرى'); return; }
     setState(() { sending = true; });
     try {
@@ -212,7 +245,7 @@ class _OrdersPageState extends State<OrdersPage> {
   @override void initState() { super.initState(); load(); }
   Future<void> load() async {
     if (mounted) setState(() { loading = true; error = null; });
-    final p = await SharedPreferences.getInstance(); final token = p.getString('token') ?? '';
+    final token = await AuthStore.token();
     try {
       final r = await http.get(Uri.parse('$apiUrl/api/requests/mine'), headers: {'Authorization': 'Bearer $token'}).timeout(const Duration(seconds: 60));
       if (r.statusCode == 200) { final raw = jsonDecode(r.body); items = raw is List ? raw.map((e) => Map<String, dynamic>.from(e as Map)).toList() : <Map<String, dynamic>>[]; } else { error = 'تعذر تحميل الطلبات'; }
@@ -235,16 +268,16 @@ class _RequestDetailPageState extends State<RequestDetailPage> {
   @override void initState() { super.initState(); request = Map<String, dynamic>.from(widget.request); }
   Future<void> nextStatus() async {
     final id = request['id']; if (id == null) return;
-    final p = await SharedPreferences.getInstance(); final token = p.getString('token') ?? '';
+    final token = await AuthStore.token();
     setState(() { busy = true; });
     try {
-      final r = await http.post(Uri.parse('$apiUrl/api/requests/$id/next'), headers: {'Authorization': 'Bearer $token'});
-      if (r.statusCode >= 200 && r.statusCode < 300) { final raw = jsonDecode(r.body); if (raw is Map && raw['request'] is Map) setState(() { request = Map<String, dynamic>.from(raw['request'] as Map); }); }
+      final r = await http.get(Uri.parse('$apiUrl/api/requests/$id'), headers: {'Authorization': 'Bearer $token'}).timeout(const Duration(seconds: 60));
+      if (r.statusCode >= 200 && r.statusCode < 300) { final raw = jsonDecode(r.body); if (raw is Map) setState(() { request = <String, dynamic>{...request, ...Map<String, dynamic>.from(raw)}; }); }
     } catch (_) {}
     if (mounted) setState(() { busy = false; });
   }
   Future<void> acceptOffer(dynamic offerId) async {
-    final p = await SharedPreferences.getInstance(); final token = p.getString('token') ?? '';
+    final token = await AuthStore.token();
     setState(() { busy = true; });
     try {
       final r = await http.post(Uri.parse('$apiUrl/api/requests/${request['id']}/accept-offer'), headers: {'Authorization': 'Bearer $token', 'Content-Type': 'application/json'}, body: jsonEncode({'providerId': offerId}));
@@ -258,7 +291,7 @@ class _RequestDetailPageState extends State<RequestDetailPage> {
     return Scaffold(appBar: AppBar(title: const Text('تفاصيل الطلب')), body: ListView(padding: const EdgeInsets.all(18), children: <Widget>[
       Card(child: Padding(padding: const EdgeInsets.all(18), child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: <Widget>[Text('${request['category']}', style: const TextStyle(fontSize: 24, fontWeight: FontWeight.w900)), const SizedBox(height: 10), Text('${request['description']}'), const SizedBox(height: 10), Text('الحالة: ${request['status']}'), const SizedBox(height: 8), Text('العنوان: ${request['address'] ?? '-'}')]))) ,
       if (offers.isNotEmpty) const Padding(padding: EdgeInsets.only(top: 14, bottom: 8), child: Text('العروض', style: TextStyle(fontSize: 20, fontWeight: FontWeight.w900))),
-      ...offers.map((raw) { final o = Map<String, dynamic>.from(raw as Map); return Card(child: ListTile(leading: const CircleAvatar(child: Icon(Icons.engineering)), title: Text('${o['providerName'] ?? 'فني'}'), subtitle: Text('السعر: ${o['price'] ?? '-'}\nالوصول: ${o['etaMinutes'] ?? '-'} دقيقة'), isThreeLine: true, trailing: FilledButton(onPressed: busy ? null : () { acceptOffer(o['id']); }, child: const Text('قبول')))); }),
+      ...offers.map((raw) { final o = Map<String, dynamic>.from(raw as Map); return Card(child: ListTile(leading: const CircleAvatar(child: Icon(Icons.engineering)), title: Text('${o['providerName'] ?? 'فني'}'), subtitle: Text('السعر: ${o['price'] ?? '-'}\nالوصول: ${o['etaMinutes'] ?? '-'} دقيقة'), isThreeLine: true, trailing: FilledButton(onPressed: busy ? null : () { acceptOffer(o['provider_id'] ?? o['id']); }, child: const Text('قبول')))); }),
       const SizedBox(height: 14), SizedBox(height: 50, child: OutlinedButton.icon(onPressed: busy ? null : nextStatus, icon: const Icon(Icons.refresh), label: const Text('تحديث حالة الطلب')))
     ]));
   }
@@ -281,7 +314,7 @@ class ProfilePage extends StatelessWidget {
       {'t':'المساعدة والدعم','i':Icons.help_outline},
     ];
     return SafeArea(child:ListView(padding:const EdgeInsets.all(18),children:<Widget>[
-      Card(child:ListTile(leading:const CircleAvatar(radius:28,child:Icon(Icons.person)),title:Text(_text(user['name'],'مستخدم'),style:const TextStyle(fontWeight:FontWeight.w900)),subtitle:Text(_text(user['phone'])))),
+      Card(child:ListTile(leading:const CircleAvatar(radius:28,child:Icon(Icons.person)),title:Text(_text(user['name'],'مستخدم'),style:const TextStyle(fontWeight:FontWeight.w900)),subtitle:Text(_text(user['email'],_text(user['phone']))))),
       const SizedBox(height:10),
       ...entries.map((e) => Card(
         child: ListTile(
@@ -318,7 +351,7 @@ class _AccountFeaturePageState extends State<AccountFeaturePage>{
   final name=TextEditingController(); final current=TextEditingController(); final next=TextEditingController();
   @override void initState(){super.initState();name.text=_text(widget.user['name']);load();}
   @override void dispose(){name.dispose();current.dispose();next.dispose();super.dispose();}
-  Future<String> token()async{final p=await SharedPreferences.getInstance();return p.getString('token')??'';}
+  Future<String> token()async=>AuthStore.token();
   Future<void> load()async{
     if(widget.kind=='العناوين')await loadList('/api/addresses');
     else if(widget.kind=='الفنيون المفضلون')await loadList('/api/favorites');
@@ -331,7 +364,7 @@ class _AccountFeaturePageState extends State<AccountFeaturePage>{
     if(mounted)setState(()=>loading=false);
   }
   Future<void> saveProfile()async{
-    try{final r=await http.put(Uri.parse(apiUrl+'/api/profile'),headers:{'Authorization':'Bearer '+await token(),'Content-Type':'application/json'},body:jsonEncode({'name':name.text.trim()}));if(r.statusCode>=200&&r.statusCode<300){final raw=jsonDecode(r.body);if(raw is Map&&raw['user'] is Map){final p=await SharedPreferences.getInstance();await p.setString('user',jsonEncode(raw['user']));}if(mounted)ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content:Text('تم تحديث الملف الشخصي')));}}
+    try{final r=await http.put(Uri.parse(apiUrl+'/api/profile'),headers:{'Authorization':'Bearer '+await token(),'Content-Type':'application/json'},body:jsonEncode({'name':name.text.trim()}));if(r.statusCode>=200&&r.statusCode<300){final raw=jsonDecode(r.body);if(raw is Map&&raw['user'] is Map){await AuthStore.saveUser(jsonEncode(raw['user']));}if(mounted)ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content:Text('تم تحديث الملف الشخصي')));}}
     catch(_){if(mounted)ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content:Text('تعذر الاتصال بالخادم')));}
   }
   Future<void> addAddress()async{
@@ -358,7 +391,7 @@ class _AccountFeaturePageState extends State<AccountFeaturePage>{
   @override Widget build(BuildContext context){
     if(widget.kind=='تعديل الملف الشخصي')return Scaffold(appBar:AppBar(title:Text(widget.kind)),body:ListView(padding:const EdgeInsets.all(18),children:<Widget>[
       TextField(controller:name,decoration:const InputDecoration(labelText:'الاسم الكامل',border:OutlineInputBorder())),const SizedBox(height:12),
-      Text('رقم الهاتف: '+_text(widget.user['phone']),style:const TextStyle(color:Colors.grey)),const SizedBox(height:20),
+      Text('البريد الإلكتروني: '+_text(widget.user['email']),style:const TextStyle(color:Colors.grey)),const SizedBox(height:6),Text('رقم الهاتف: '+_text(widget.user['phone']),style:const TextStyle(color:Colors.grey)),const SizedBox(height:20),
       FilledButton(onPressed:saveProfile,child:const Text('حفظ التغييرات')),
     ]));
     if(widget.kind=='الأمان والخصوصية')return Scaffold(appBar:AppBar(title:Text(widget.kind)),body:ListView(padding:const EdgeInsets.all(18),children:<Widget>[
@@ -450,8 +483,7 @@ class _RequestTimelinePageState extends State<RequestTimelinePage> {
 
   Future<void> load() async {
     if (mounted) setState(() { loading = true; error = null; });
-    final p = await SharedPreferences.getInstance();
-    final token = p.getString('token') ?? '';
+    final token = await AuthStore.token();
     try {
       final r = await http.get(Uri.parse('$apiUrl/api/requests/${widget.requestId}/timeline'),
         headers: {'Authorization': 'Bearer $token'}).timeout(const Duration(seconds: 60));
@@ -535,7 +567,7 @@ class _ProviderJobDetailPageState extends State<ProviderJobDetailPage> {
 
   void message(String s) { if (mounted) ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text(s))); }
 
-  Future<String> _token() async { final p = await SharedPreferences.getInstance(); return p.getString('token') ?? ''; }
+  Future<String> _token() => AuthStore.token();
 
   Future<void> load() async {
     final token = await _token();
@@ -627,7 +659,7 @@ class _ProviderJobsPageState extends State<ProviderJobsPage> {
 
   @override void initState() { super.initState(); load(); }
 
-  Future<String> _token() async { final p = await SharedPreferences.getInstance(); return p.getString('token') ?? ''; }
+  Future<String> _token() => AuthStore.token();
 
   Future<void> load() async {
     if (mounted) setState(() { loading = true; error = null; });
@@ -703,13 +735,13 @@ class ForgotPasswordPage extends StatefulWidget {
 }
 
 class _ForgotPasswordPageState extends State<ForgotPasswordPage> {
-  final phone = TextEditingController();
+  final email = TextEditingController();
   final code = TextEditingController();
   final password = TextEditingController();
   bool busy = false;
   bool sent = false;
 
-  @override void dispose() { phone.dispose(); code.dispose(); password.dispose(); super.dispose(); }
+  @override void dispose() { email.dispose(); code.dispose(); password.dispose(); super.dispose(); }
 
   void message(String s) { if (mounted) ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text(s))); }
 
@@ -729,9 +761,9 @@ class _ForgotPasswordPageState extends State<ForgotPasswordPage> {
   }
 
   Future<void> sendCode() async {
-    if (phone.text.trim().length < 9) { message('أدخل رقم هاتف صحيح'); return; }
+    if (!_validEmail(email.text)) { message('أدخل بريداً إلكترونياً صحيحاً'); return; }
     setState(() { busy = true; });
-    final data = await call('forgot-password', {'phone': phone.text.trim()});
+    final data = await call('forgot-password', {'email': email.text.trim()});
     if (!mounted) return;
     setState(() { busy = false; if (data != null) sent = true; });
     if (data != null) {
@@ -744,7 +776,7 @@ class _ForgotPasswordPageState extends State<ForgotPasswordPage> {
     if (code.text.trim().length != 6) { message('أدخل رمز التحقق المكوّن من 6 أرقام'); return; }
     if (password.text.length < 6) { message('كلمة المرور يجب أن تكون 6 أحرف على الأقل'); return; }
     setState(() { busy = true; });
-    final data = await call('reset-password', {'phone': phone.text.trim(), 'code': code.text.trim(), 'newPassword': password.text});
+    final data = await call('reset-password', {'email': email.text.trim(), 'code': code.text.trim(), 'newPassword': password.text});
     if (!mounted) return;
     setState(() { busy = false; });
     if (data != null) {
@@ -761,11 +793,11 @@ class _ForgotPasswordPageState extends State<ForgotPasswordPage> {
     return Scaffold(
       appBar: AppBar(title: const Text('استرجاع كلمة المرور')),
       body: SafeArea(child: SingleChildScrollView(padding: const EdgeInsets.all(20), child: Column(crossAxisAlignment: CrossAxisAlignment.stretch, children: <Widget>[
-        const Text('أدخل رقم هاتفك المسجّل، ثم رمز التحقق، ثم كلمة المرور الجديدة.', style: TextStyle(fontSize: 15, color: Color(0xFF55606E))),
+        const Text('أدخل بريدك الإلكتروني المسجّل، ثم الرمز الذي وصلك على بريدك، ثم كلمة المرور الجديدة.', style: TextStyle(fontSize: 15, color: Color(0xFF55606E))),
         const SizedBox(height: 18),
-        TextField(controller: phone, keyboardType: TextInputType.phone, decoration: const InputDecoration(labelText: 'رقم الهاتف', border: OutlineInputBorder())),
+        TextField(controller: email, keyboardType: TextInputType.emailAddress, autocorrect: false, decoration: const InputDecoration(labelText: 'البريد الإلكتروني', border: OutlineInputBorder())),
         const SizedBox(height: 12),
-        FilledButton.icon(onPressed: busy ? null : sendCode, icon: const Icon(Icons.sms_outlined), label: Text(sent ? 'إعادة إرسال الرمز' : 'إرسال رمز التحقق')),
+        FilledButton.icon(onPressed: busy ? null : sendCode, icon: const Icon(Icons.email_outlined), label: Text(sent ? 'إعادة إرسال الرمز' : 'إرسال رمز التحقق')),
         if (sent) ...<Widget>[
           const SizedBox(height: 18),
           TextField(controller: code, keyboardType: TextInputType.number, decoration: const InputDecoration(labelText: 'رمز التحقق (6 أرقام)', border: OutlineInputBorder())),
