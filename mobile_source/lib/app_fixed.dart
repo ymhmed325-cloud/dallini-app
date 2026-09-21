@@ -711,18 +711,67 @@ class _ProviderJobsPageState extends State<ProviderJobsPage> {
     if (mounted) setState(() { loading = false; });
   }
 
-  Future<void> accept(dynamic id) async {
-    final token = await _token();
+  Future<void> submitOffer(Map<String, dynamic> job) async {
+    final price = TextEditingController();
+    final eta = TextEditingController();
     try {
-      final r = await http.post(Uri.parse('$apiUrl/api/providers/requests/$id/accept'), headers: {'Authorization': 'Bearer $token'}).timeout(const Duration(seconds: 60));
-      if (r.statusCode >= 200 && r.statusCode < 300) {
-        if (mounted) ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content: Text('تم قبول الطلب، ستجده في تبويب طلباتي')));
-      } else {
-        final raw = jsonDecode(r.body);
-        final msg = raw is Map ? _text(raw['error'], 'تعذر قبول الطلب') : 'تعذر قبول الطلب';
-        if (mounted) ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text(msg)));
+      final result = await showDialog<bool>(
+        context: context,
+        builder: (dialogContext) => AlertDialog(
+          title: const Text('إرسال عرض للعميل'),
+          content: Column(
+            mainAxisSize: MainAxisSize.min,
+            children: <Widget>[
+              TextField(
+                controller: price,
+                keyboardType: TextInputType.number,
+                decoration: const InputDecoration(labelText: 'السعر بالدينار العراقي'),
+              ),
+              const SizedBox(height: 12),
+              TextField(
+                controller: eta,
+                decoration: const InputDecoration(labelText: 'وقت الوصول', hintText: 'مثال: 30 دقيقة'),
+              ),
+            ],
+          ),
+          actions: <Widget>[
+            TextButton(onPressed: () => Navigator.pop(dialogContext, false), child: const Text('إلغاء')),
+            FilledButton(
+              onPressed: () async {
+                final p = int.tryParse(price.text.trim());
+                if (p == null || p <= 0 || eta.text.trim().isEmpty) {
+                  ScaffoldMessenger.of(dialogContext).showSnackBar(const SnackBar(content: Text('أدخل السعر ووقت الوصول')));
+                  return;
+                }
+                try {
+                  final r = await http.post(
+                    Uri.parse('$apiUrl/api/requests/' + job['id'].toString() + '/offers'),
+                    headers: {'Authorization': 'Bearer ' + await _token(), 'Content-Type': 'application/json'},
+                    body: jsonEncode({'price': p, 'eta': eta.text.trim()}),
+                  ).timeout(const Duration(seconds: 60));
+                  final raw = jsonDecode(r.body);
+                  final data = raw is Map ? Map<String, dynamic>.from(raw) : <String, dynamic>{};
+                  if (r.statusCode >= 200 && r.statusCode < 300) {
+                    Navigator.pop(dialogContext, true);
+                  } else {
+                    ScaffoldMessenger.of(dialogContext).showSnackBar(SnackBar(content: Text(_text(data['error'], 'تعذر إرسال العرض'))));
+                  }
+                } catch (_) {
+                  ScaffoldMessenger.of(dialogContext).showSnackBar(const SnackBar(content: Text('تعذر الاتصال بالخادم')));
+                }
+              },
+              child: const Text('إرسال العرض'),
+            ),
+          ],
+        ),
+      );
+      if (result == true && mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content: Text('تم إرسال العرض للعميل')));
       }
-    } catch (_) { if (mounted) ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content: Text('تعذر الاتصال بالخادم'))); }
+    } finally {
+      price.dispose();
+      eta.dispose();
+    }
     await load();
   }
 
@@ -741,7 +790,7 @@ class _ProviderJobsPageState extends State<ProviderJobsPage> {
       isThreeLine: true,
       trailing: assignedJob
         ? const Icon(Icons.chevron_left)
-        : FilledButton(onPressed: () { accept(job['id']); }, child: const Text('قبول')),
+        : FilledButton(onPressed: () { submitOffer(job); }, child: const Text('إرسال عرض')),
       onTap: assignedJob ? () { Navigator.push(context, MaterialPageRoute(builder: (_) => ProviderJobDetailPage(job: job))).then((_) { load(); }); } : null,
     ));
   }
