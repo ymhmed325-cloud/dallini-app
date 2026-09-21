@@ -72,7 +72,7 @@ const post = (path, obj, token) => req(path, {
     const code = String(forgot.body.devCode);
 
     const forgotUnknown = await post('/api/auth/forgot-password', { phone: '07709999999' });
-    check('رفض رقم غير مسجل', forgotUnknown.status === 404);
+    check('عدم كشف الأرقام غير المسجلة', forgotUnknown.status === 200 && !forgotUnknown.body.devCode);
 
     const badReset = await post('/api/auth/reset-password', { phone, code: '000000', newPassword });
     check('رفض رمز خاطئ', badReset.status === 400);

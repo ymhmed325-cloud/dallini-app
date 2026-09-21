@@ -3,6 +3,7 @@ import 'dart:convert';
 import 'dart:io';
 import 'package:flutter/material.dart';
 import 'package:http/http.dart' as http;
+import 'package:flutter_secure_storage/flutter_secure_storage.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 
 const String apiUrl = String.fromEnvironment('API_URL', defaultValue: 'https://dallini-app.onrender.com');
@@ -10,7 +11,39 @@ const List<String> services = <String>['كهرباء', 'سباكة', 'تكييف
 const List<IconData> serviceIcons = <IconData>[Icons.bolt, Icons.water_drop, Icons.ac_unit, Icons.build, Icons.cleaning_services, Icons.directions_car];
 const List<Color> serviceColors = <Color>[Colors.amber, Colors.blue, Colors.cyan, Colors.deepPurple, Colors.green, Colors.red];
 
-void main() { runApp(const DalliniApp()); }
+/// تخزين آمن للتوكن وبيانات الحساب (Android Keystore) بدل SharedPreferences النصية.
+class AuthStore {
+  static const FlutterSecureStorage _s = FlutterSecureStorage(aOptions: AndroidOptions(encryptedSharedPreferences: true));
+  static Future<String> token() async => (await _s.read(key: 'token')) ?? '';
+  static Future<String?> userJson() => _s.read(key: 'user');
+  static Future<void> save(String token, String userJson) async {
+    await _s.write(key: 'token', value: token);
+    await _s.write(key: 'user', value: userJson);
+  }
+  static Future<void> saveUser(String userJson) => _s.write(key: 'user', value: userJson);
+  static Future<void> clear() async {
+    await _s.delete(key: 'token');
+    await _s.delete(key: 'user');
+  }
+  /// ترحيل لمرة واحدة: ينقل التوكن القديم من SharedPreferences ثم يحذفه منها.
+  static Future<void> migrateLegacy() async {
+    try {
+      final p = await SharedPreferences.getInstance();
+      final t = p.getString('token'), u = p.getString('user');
+      if (t != null && t.isNotEmpty && (await token()).isEmpty) {
+        await save(t, u ?? '{}');
+      }
+      await p.remove('token');
+      await p.remove('user');
+    } catch (_) {}
+  }
+}
+
+Future<void> main() async {
+  WidgetsFlutterBinding.ensureInitialized();
+  await AuthStore.migrateLegacy();
+  runApp(const DalliniApp());
+}
 
 class DalliniApp extends StatelessWidget {
   const DalliniApp({super.key});
@@ -34,8 +67,7 @@ class _RootPageState extends State<RootPage> {
   bool loading = true;
   @override void initState() { super.initState(); load(); }
   Future<void> load() async {
-    final p = await SharedPreferences.getInstance();
-    final raw = p.getString('user');
+    final raw = await AuthStore.userJson();
     Map<String, dynamic>? value;
     if (raw != null) {
       try { value = Map<String, dynamic>.from(jsonDecode(raw) as Map); } catch (_) {}
@@ -43,15 +75,11 @@ class _RootPageState extends State<RootPage> {
     if (mounted) setState(() { user = value; loading = false; });
   }
   Future<void> loginDone(String token, Map<String, dynamic> account) async {
-    final p = await SharedPreferences.getInstance();
-    await p.setString('token', token);
-    await p.setString('user', jsonEncode(account));
+    await AuthStore.save(token, jsonEncode(account));
     if (mounted) setState(() { user = account; });
   }
   Future<void> logout() async {
-    final p = await SharedPreferences.getInstance();
-    await p.remove('token');
-    await p.remove('user');
+    await AuthStore.clear();
     if (mounted) setState(() { user = null; });
   }
   @override Widget build(BuildContext context) {
@@ -182,8 +210,7 @@ class _NewRequestPageState extends State<NewRequestPage> {
   Future<void> send() async {
     if (service == null) { message('اختر نوع الخدمة'); return; }
     if (desc.text.trim().length < 3) { message('اكتب وصف المشكلة'); return; }
-    final p = await SharedPreferences.getInstance();
-    final token = p.getString('token') ?? '';
+    final token = await AuthStore.token();
     if (token.isEmpty) { message('سجّل الدخول مرة أخرى'); return; }
     setState(() { sending = true; });
     try {
@@ -212,7 +239,7 @@ class _OrdersPageState extends State<OrdersPage> {
   @override void initState() { super.initState(); load(); }
   Future<void> load() async {
     if (mounted) setState(() { loading = true; error = null; });
-    final p = await SharedPreferences.getInstance(); final token = p.getString('token') ?? '';
+    final token = await AuthStore.token();
     try {
       final r = await http.get(Uri.parse('$apiUrl/api/requests/mine'), headers: {'Authorization': 'Bearer $token'}).timeout(const Duration(seconds: 60));
       if (r.statusCode == 200) { final raw = jsonDecode(r.body); items = raw is List ? raw.map((e) => Map<String, dynamic>.from(e as Map)).toList() : <Map<String, dynamic>>[]; } else { error = 'تعذر تحميل الطلبات'; }
@@ -235,16 +262,16 @@ class _RequestDetailPageState extends State<RequestDetailPage> {
   @override void initState() { super.initState(); request = Map<String, dynamic>.from(widget.request); }
   Future<void> nextStatus() async {
     final id = request['id']; if (id == null) return;
-    final p = await SharedPreferences.getInstance(); final token = p.getString('token') ?? '';
+    final token = await AuthStore.token();
     setState(() { busy = true; });
     try {
-      final r = await http.post(Uri.parse('$apiUrl/api/requests/$id/next'), headers: {'Authorization': 'Bearer $token'});
-      if (r.statusCode >= 200 && r.statusCode < 300) { final raw = jsonDecode(r.body); if (raw is Map && raw['request'] is Map) setState(() { request = Map<String, dynamic>.from(raw['request'] as Map); }); }
+      final r = await http.get(Uri.parse('$apiUrl/api/requests/$id'), headers: {'Authorization': 'Bearer $token'}).timeout(const Duration(seconds: 60));
+      if (r.statusCode >= 200 && r.statusCode < 300) { final raw = jsonDecode(r.body); if (raw is Map) setState(() { request = <String, dynamic>{...request, ...Map<String, dynamic>.from(raw)}; }); }
     } catch (_) {}
     if (mounted) setState(() { busy = false; });
   }
   Future<void> acceptOffer(dynamic offerId) async {
-    final p = await SharedPreferences.getInstance(); final token = p.getString('token') ?? '';
+    final token = await AuthStore.token();
     setState(() { busy = true; });
     try {
       final r = await http.post(Uri.parse('$apiUrl/api/requests/${request['id']}/accept-offer'), headers: {'Authorization': 'Bearer $token', 'Content-Type': 'application/json'}, body: jsonEncode({'providerId': offerId}));
@@ -258,7 +285,7 @@ class _RequestDetailPageState extends State<RequestDetailPage> {
     return Scaffold(appBar: AppBar(title: const Text('تفاصيل الطلب')), body: ListView(padding: const EdgeInsets.all(18), children: <Widget>[
       Card(child: Padding(padding: const EdgeInsets.all(18), child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: <Widget>[Text('${request['category']}', style: const TextStyle(fontSize: 24, fontWeight: FontWeight.w900)), const SizedBox(height: 10), Text('${request['description']}'), const SizedBox(height: 10), Text('الحالة: ${request['status']}'), const SizedBox(height: 8), Text('العنوان: ${request['address'] ?? '-'}')]))) ,
       if (offers.isNotEmpty) const Padding(padding: EdgeInsets.only(top: 14, bottom: 8), child: Text('العروض', style: TextStyle(fontSize: 20, fontWeight: FontWeight.w900))),
-      ...offers.map((raw) { final o = Map<String, dynamic>.from(raw as Map); return Card(child: ListTile(leading: const CircleAvatar(child: Icon(Icons.engineering)), title: Text('${o['providerName'] ?? 'فني'}'), subtitle: Text('السعر: ${o['price'] ?? '-'}\nالوصول: ${o['etaMinutes'] ?? '-'} دقيقة'), isThreeLine: true, trailing: FilledButton(onPressed: busy ? null : () { acceptOffer(o['id']); }, child: const Text('قبول')))); }),
+      ...offers.map((raw) { final o = Map<String, dynamic>.from(raw as Map); return Card(child: ListTile(leading: const CircleAvatar(child: Icon(Icons.engineering)), title: Text('${o['providerName'] ?? 'فني'}'), subtitle: Text('السعر: ${o['price'] ?? '-'}\nالوصول: ${o['etaMinutes'] ?? '-'} دقيقة'), isThreeLine: true, trailing: FilledButton(onPressed: busy ? null : () { acceptOffer(o['provider_id'] ?? o['id']); }, child: const Text('قبول')))); }),
       const SizedBox(height: 14), SizedBox(height: 50, child: OutlinedButton.icon(onPressed: busy ? null : nextStatus, icon: const Icon(Icons.refresh), label: const Text('تحديث حالة الطلب')))
     ]));
   }
@@ -318,7 +345,7 @@ class _AccountFeaturePageState extends State<AccountFeaturePage>{
   final name=TextEditingController(); final current=TextEditingController(); final next=TextEditingController();
   @override void initState(){super.initState();name.text=_text(widget.user['name']);load();}
   @override void dispose(){name.dispose();current.dispose();next.dispose();super.dispose();}
-  Future<String> token()async{final p=await SharedPreferences.getInstance();return p.getString('token')??'';}
+  Future<String> token()async=>AuthStore.token();
   Future<void> load()async{
     if(widget.kind=='العناوين')await loadList('/api/addresses');
     else if(widget.kind=='الفنيون المفضلون')await loadList('/api/favorites');
@@ -331,7 +358,7 @@ class _AccountFeaturePageState extends State<AccountFeaturePage>{
     if(mounted)setState(()=>loading=false);
   }
   Future<void> saveProfile()async{
-    try{final r=await http.put(Uri.parse(apiUrl+'/api/profile'),headers:{'Authorization':'Bearer '+await token(),'Content-Type':'application/json'},body:jsonEncode({'name':name.text.trim()}));if(r.statusCode>=200&&r.statusCode<300){final raw=jsonDecode(r.body);if(raw is Map&&raw['user'] is Map){final p=await SharedPreferences.getInstance();await p.setString('user',jsonEncode(raw['user']));}if(mounted)ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content:Text('تم تحديث الملف الشخصي')));}}
+    try{final r=await http.put(Uri.parse(apiUrl+'/api/profile'),headers:{'Authorization':'Bearer '+await token(),'Content-Type':'application/json'},body:jsonEncode({'name':name.text.trim()}));if(r.statusCode>=200&&r.statusCode<300){final raw=jsonDecode(r.body);if(raw is Map&&raw['user'] is Map){await AuthStore.saveUser(jsonEncode(raw['user']));}if(mounted)ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content:Text('تم تحديث الملف الشخصي')));}}
     catch(_){if(mounted)ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content:Text('تعذر الاتصال بالخادم')));}
   }
   Future<void> addAddress()async{
@@ -450,8 +477,7 @@ class _RequestTimelinePageState extends State<RequestTimelinePage> {
 
   Future<void> load() async {
     if (mounted) setState(() { loading = true; error = null; });
-    final p = await SharedPreferences.getInstance();
-    final token = p.getString('token') ?? '';
+    final token = await AuthStore.token();
     try {
       final r = await http.get(Uri.parse('$apiUrl/api/requests/${widget.requestId}/timeline'),
         headers: {'Authorization': 'Bearer $token'}).timeout(const Duration(seconds: 60));
@@ -535,7 +561,7 @@ class _ProviderJobDetailPageState extends State<ProviderJobDetailPage> {
 
   void message(String s) { if (mounted) ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text(s))); }
 
-  Future<String> _token() async { final p = await SharedPreferences.getInstance(); return p.getString('token') ?? ''; }
+  Future<String> _token() => AuthStore.token();
 
   Future<void> load() async {
     final token = await _token();
@@ -627,7 +653,7 @@ class _ProviderJobsPageState extends State<ProviderJobsPage> {
 
   @override void initState() { super.initState(); load(); }
 
-  Future<String> _token() async { final p = await SharedPreferences.getInstance(); return p.getString('token') ?? ''; }
+  Future<String> _token() => AuthStore.token();
 
   Future<void> load() async {
     if (mounted) setState(() { loading = true; error = null; });
