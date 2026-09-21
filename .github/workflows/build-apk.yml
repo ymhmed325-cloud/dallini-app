@@ -5,7 +5,7 @@ permissions:
 
 on:
   push:
-    branches: [main]
+    branches: [main, dallini-offers-security]
   workflow_dispatch:
     inputs:
       api_url:
