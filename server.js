@@ -26,11 +26,11 @@ function rateLimit(name, max, windowMs, keyFn){
   };
 }
 setInterval(()=>{const n=Date.now();for(const [k,v] of _hits)if(v.reset<n)_hits.delete(k);},60*1000).unref();
-const byPhone = req => String((req.body&&req.body.phone)||'').replace(/\s+/g,'');
-const limitLogin    = [rateLimit('login-ip',30,15*60*1000), rateLimit('login-phone',8,15*60*1000,byPhone)];
+const byEmail = req => String((req.body&&req.body.email)||'').trim().toLowerCase();
+const limitLogin    = [rateLimit('login-ip',30,15*60*1000), rateLimit('login-email',8,15*60*1000,byEmail)];
 const limitRegister = rateLimit('register-ip',10,60*60*1000);
-const limitForgot   = [rateLimit('forgot-ip',10,60*60*1000), rateLimit('forgot-phone',3,60*60*1000,byPhone)];
-const limitReset    = [rateLimit('reset-ip',20,60*60*1000), rateLimit('reset-phone',10,60*60*1000,byPhone)];
+const limitForgot   = [rateLimit('forgot-ip',10,60*60*1000), rateLimit('forgot-email',3,60*60*1000,byEmail)];
+const limitReset    = [rateLimit('reset-ip',20,60*60*1000), rateLimit('reset-email',10,60*60*1000,byEmail)];
 
 const categories = [
   { id:'electricity', name:'كهرباء', icon:'bolt' },
@@ -45,16 +45,16 @@ const demoProviders = [
   { id:'p2', name:'محمد كريم', phone:'07700000002', role:'provider', service:'كهرباء', rating:4.7, price:20000, eta:'40 دقيقة', verified:true },
 ];
 const memory = { users:new Map(), sessions:new Map(), sessionTimes:new Map(), requests:[], offers:new Map(), resets:new Map(), events:new Map(), nextUser:1, nextRequest:1 };
-const { sendSms, checkTwilioVerify, gatewayName, isConfigured: smsConfigured } = require('./sms');
+const { sendEmail, providerName: mailName, isConfigured: mailConfigured } = require('./mailer');
 // وضع التجربة: يُعاد رمز التحقق في الاستجابة.
-// إن كانت بوابة SMS مضبوطة فالحالة الافتراضية إرسال حقيقي، ما لم تُضبط RESET_DEMO_MODE=true.
+// وضع التجربة (devCode) لا يعمل إلا بضبط RESET_DEMO_MODE=true خارج الإنتاج.
 // وضع التجربة يُفعَّل فقط بضبط RESET_DEMO_MODE=true صراحةً، ولا يعمل أبداً مع NODE_ENV=production.
 const RESET_DEMO = process.env.RESET_DEMO_MODE === 'true' && process.env.NODE_ENV !== 'production';
 // مسار /next الخاص بالعميل (محاكاة) معطّل إلا بضبط DEMO_FLOW=true
 const DEMO_FLOW = process.env.DEMO_FLOW === 'true' && process.env.NODE_ENV !== 'production';
 const SESSION_DAYS = 30;
-if (smsConfigured()) console.log(`SMS gateway: ${gatewayName()}`);
-else console.log('SMS gateway: none (وضع السجل) — اضبط TWILIO_* أو VONAGE_* أو SMS_API_URL للإرسال الحقيقي');
+if (mailConfigured()) console.log(`Email gateway: ${mailName()}`);
+else console.log('Email gateway: none — اضبط RESEND_API_KEY أو BREVO_API_KEY مع EMAIL_FROM لإرسال رموز الاسترجاع');
 let pool = null;
 if (process.env.DATABASE_URL) pool = new Pool({ connectionString:process.env.DATABASE_URL, ssl:(process.env.DATABASE_SSL==='false'?false:{rejectUnauthorized:process.env.DB_SSL_STRICT==='true'}), max:5 });
 
@@ -62,6 +62,10 @@ function hashPassword(password,salt=crypto.randomBytes(16).toString('hex')){retu
 function verifyPassword(password,stored){const [salt,hash]=String(stored||'').split(':');if(!salt||!hash)return false;const actual=crypto.scryptSync(password,salt,64).toString('hex');return crypto.timingSafeEqual(Buffer.from(hash,'hex'),Buffer.from(actual,'hex'));}
 function token(){return crypto.randomBytes(32).toString('hex');}
 function normalizePhone(v){return String(v||'').replace(/\s+/g,'').replace(/^00/,'+');}
+function normalizeEmail(v){return String(v||'').trim().toLowerCase();}
+const EMAIL_RE=/^[^\s@]{1,64}@[^\s@]{1,255}\.[^\s@]{2,}$/;
+function validEmail(e){return e.length<=254&&EMAIL_RE.test(e);}
+function codeHash(email,code){return crypto.createHash('sha256').update(email+':'+code).digest('hex');}
 const PROVIDER_FLOW = ['accepted','on_way','arrived','in_progress','completed'];
 const STATUS_LABELS = {matching:'جاري البحث عن فني',offer:'وصل عرض فني',accepted:'تم قبول الطلب',on_way:'الفني في الطريق',arrived:'وصل الفني للموقع',in_progress:'قيد التنفيذ',completed:'مكتمل',cancelled:'ملغي'};
 function allowedNext(status){const i=PROVIDER_FLOW.indexOf(status);if(i<0||i>=PROVIDER_FLOW.length-1)return [];return [PROVIDER_FLOW[i+1]];}
@@ -85,89 +89,116 @@ async function initDb(){
   await pool.query(`CREATE TABLE IF NOT EXISTS notifications (id SERIAL PRIMARY KEY,user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,title TEXT NOT NULL,message TEXT NOT NULL,read_at TIMESTAMPTZ,created_at TIMESTAMPTZ NOT NULL DEFAULT NOW());`);
   await pool.query(`CREATE TABLE IF NOT EXISTS messages (id SERIAL PRIMARY KEY,request_id INTEGER NOT NULL REFERENCES requests(id) ON DELETE CASCADE,sender_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,receiver_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,message TEXT NOT NULL,created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),read_at TIMESTAMPTZ);`);
   await pool.query(`CREATE TABLE IF NOT EXISTS reviews (id SERIAL PRIMARY KEY,request_id INTEGER UNIQUE NOT NULL REFERENCES requests(id) ON DELETE CASCADE,customer_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,provider_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,rating INTEGER NOT NULL CHECK(rating BETWEEN 1 AND 5),comment TEXT,created_at TIMESTAMPTZ NOT NULL DEFAULT NOW());`);
+  await pool.query(`ALTER TABLE users ADD COLUMN IF NOT EXISTS email TEXT;`);
+  await pool.query(`ALTER TABLE users ALTER COLUMN phone DROP NOT NULL;`);
+  await pool.query(`ALTER TABLE users DROP CONSTRAINT IF EXISTS users_phone_key;`);
+  await pool.query(`CREATE UNIQUE INDEX IF NOT EXISTS users_email_lower_key ON users (lower(email));`);
+  await pool.query(`CREATE TABLE IF NOT EXISTS email_resets (email TEXT PRIMARY KEY,code_hash TEXT NOT NULL,expires TIMESTAMPTZ NOT NULL,attempts INTEGER NOT NULL DEFAULT 0);`);
   await pool.query(`CREATE TABLE IF NOT EXISTS support_tickets (id SERIAL PRIMARY KEY,user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,subject TEXT NOT NULL,message TEXT NOT NULL,status TEXT NOT NULL DEFAULT 'open',created_at TIMESTAMPTZ NOT NULL DEFAULT NOW());`);
 }
-async function userById(id){if(!pool)return [...memory.users.values()].find(u=>String(u.id)===String(id))||null;const r=await pool.query('SELECT id,name,phone,role,created_at FROM users WHERE id=$1',[id]);return r.rows[0]||null;}
+async function userById(id){if(!pool)return [...memory.users.values()].find(u=>String(u.id)===String(id))||null;const r=await pool.query('SELECT id,name,email,phone,role,created_at FROM users WHERE id=$1',[id]);return r.rows[0]||null;}
 async function auth(req,res,next){const h=String(req.headers.authorization||'');const t=h.startsWith('Bearer ')?h.slice(7):'';if(!t)return res.status(401).json({error:'يجب تسجيل الدخول'});let uid=memory.sessions.get(t);if(uid&&Date.now()-(memory.sessionTimes.get(t)||0)>SESSION_DAYS*86400000){memory.sessions.delete(t);memory.sessionTimes.delete(t);uid=undefined;}if(pool){const r=await pool.query('SELECT user_id FROM sessions WHERE token=$1 AND created_at > NOW() - ($2 || \' days\')::interval',[t,String(SESSION_DAYS)]);if(r.rows[0])uid=r.rows[0].user_id;}if(!uid)return res.status(401).json({error:'انتهت الجلسة، سجل الدخول مرة أخرى'});req.user=await userById(uid);if(!req.user)return res.status(401).json({error:'الحساب غير موجود'});req.token=t;next();}
 
-app.get('/api/health',(q,r)=>r.json({ok:true,service:'Dallini Backend',database:!!pool,sms:gatewayName(),resetDemo:RESET_DEMO}));
+app.get('/api/health',(q,r)=>r.json({ok:true,service:'Dallini Backend',database:!!pool,email:mailName(),resetDemo:RESET_DEMO}));
 app.get('/api/categories',(q,r)=>r.json(categories));
 
-app.post('/api/auth/register',limitRegister,async(req,res)=>{try{const name=String(req.body.name||'').trim(),phone=normalizePhone(req.body.phone),password=String(req.body.password||''),role=req.body.role==='provider'?'provider':'customer';if(name.length<2)return res.status(400).json({error:'اكتب اسمك'});if(phone.length<9)return res.status(400).json({error:'أدخل رقم هاتف صحيح'});if(password.length<6)return res.status(400).json({error:'كلمة المرور يجب أن تكون 6 أحرف على الأقل'});let user,id;if(pool){if((await pool.query('SELECT id FROM users WHERE phone=$1',[phone])).rows[0])return res.status(409).json({error:'رقم الهاتف مستخدم مسبقاً'});const r=await pool.query('INSERT INTO users(name,phone,password_hash,role) VALUES($1,$2,$3,$4) RETURNING id,name,phone,role,created_at',[name,phone,hashPassword(password),role]);user=r.rows[0];id=user.id;}else{if([...memory.users.values()].some(u=>u.phone===phone))return res.status(409).json({error:'رقم الهاتف مستخدم مسبقاً'});id=memory.nextUser++;user={id,name,phone,role,created_at:new Date().toISOString()};memory.users.set(id,{...user,password_hash:hashPassword(password)});}const t=token();if(pool)await pool.query('INSERT INTO sessions(token,user_id) VALUES($1,$2)',[t,id]);else (memory.sessions.set(t,id),memory.sessionTimes.set(t,Date.now()));res.status(201).json({token:t,user});}catch(e){console.error(e);res.status(500).json({error:'تعذر إنشاء الحساب'});}});
-app.post('/api/auth/login',limitLogin,async(req,res)=>{try{const phone=normalizePhone(req.body.phone),password=String(req.body.password||'');let row;if(pool)row=(await pool.query('SELECT * FROM users WHERE phone=$1',[phone])).rows[0];else row=[...memory.users.values()].find(u=>u.phone===phone);if(!row||!verifyPassword(password,row.password_hash))return res.status(401).json({error:'رقم الهاتف أو كلمة المرور غير صحيحة'});const t=token();if(pool)await pool.query('INSERT INTO sessions(token,user_id) VALUES($1,$2)',[t,row.id]);else (memory.sessions.set(t,row.id),memory.sessionTimes.set(t,Date.now()));res.json({token:t,user:{id:row.id,name:row.name,phone:row.phone,role:row.role}});}catch(e){console.error(e);res.status(500).json({error:'تعذر تسجيل الدخول'});}});
-function resetCode(){return String(crypto.randomInt(100000,1000000));}
-app.post('/api/auth/forgot-password',limitForgot,async(req,res)=>{try{
-  const phone=normalizePhone(req.body.phone);
-  if(phone.length<9)return res.status(400).json({error:'أدخل رقم هاتف صحيح'});
-  let exists=false;
-  if(pool)exists=!!(await pool.query('SELECT 1 FROM users WHERE phone=$1',[phone])).rows[0];
-  else exists=[...memory.users.values()].some(u=>u.phone===phone);
-  if(!exists)return res.json({ok:true,message:'إن كان الرقم مسجلاً فسيصلك رمز التحقق',sent:false});
-
-  const code=resetCode(),expires=new Date(Date.now()+10*60*1000);
-  const text=`رمز استرجاع كلمة المرور في تطبيق دلّيني: ${code} (صالح 10 دقائق)`;
-  const delivery=await sendSms(phone,text);
-
-  if(!delivery.sent&&!RESET_DEMO){
-    console.error('sms failed',delivery);
-    return res.status(502).json({error:'تعذر إرسال رمز التحقق عبر الرسائل، حاول لاحقاً',gateway:delivery.gateway,reason:delivery.reason||null});
-  }
-
-  // Twilio Verify يولّد ويدير الرمز بنفسه؛ لا نخزن الرمز الحقيقي في قاعدة البيانات.
-  const storedCode=delivery.gateway==='twilio-verify' ? 'TWILIO' : code;
+app.post('/api/auth/register',limitRegister,async(req,res)=>{try{
+  const name=String(req.body.name||'').trim(),email=normalizeEmail(req.body.email),password=String(req.body.password||''),role=req.body.role==='provider'?'provider':'customer';
+  const phoneRaw=normalizePhone(req.body.phone),phone=phoneRaw?phoneRaw:null;
+  if(name.length<2)return res.status(400).json({error:'اكتب اسمك'});
+  if(!validEmail(email))return res.status(400).json({error:'أدخل بريداً إلكترونياً صحيحاً'});
+  if(phone&&phone.length<9)return res.status(400).json({error:'رقم الهاتف غير صحيح'});
+  if(password.length<6)return res.status(400).json({error:'كلمة المرور يجب أن تكون 6 أحرف على الأقل'});
+  let user,id;
   if(pool){
-    await pool.query('INSERT INTO password_resets(phone,code,expires,attempts) VALUES($1,$2,$3,0) ON CONFLICT (phone) DO UPDATE SET code=$2,expires=$3,attempts=0',[phone,storedCode,expires]);
+    if((await pool.query('SELECT id FROM users WHERE lower(email)=$1',[email])).rows[0])return res.status(409).json({error:'البريد الإلكتروني مستخدم مسبقاً'});
+    const r=await pool.query('INSERT INTO users(name,email,phone,password_hash,role) VALUES($1,$2,$3,$4,$5) RETURNING id,name,email,phone,role,created_at',[name,email,phone,hashPassword(password),role]);
+    user=r.rows[0];id=user.id;
   }else{
-    memory.resets.set(phone,{code:storedCode,expires:expires.getTime(),attempts:0});
+    if([...memory.users.values()].some(u=>u.email===email))return res.status(409).json({error:'البريد الإلكتروني مستخدم مسبقاً'});
+    id=memory.nextUser++;user={id,name,email,phone,role,created_at:new Date().toISOString()};memory.users.set(id,{...user,password_hash:hashPassword(password)});
   }
+  const t=token();
+  if(pool)await pool.query('INSERT INTO sessions(token,user_id) VALUES($1,$2)',[t,id]);else (memory.sessions.set(t,id),memory.sessionTimes.set(t,Date.now()));
+  res.status(201).json({token:t,user});
+}catch(e){console.error(e);res.status(500).json({error:'تعذر إنشاء الحساب'});}});
 
-  const body={ok:true,message:'تم إرسال رمز التحقق إلى هاتفك، صالح لمدة 10 دقائق',sent:!!delivery.sent,gateway:delivery.gateway};
+app.post('/api/auth/login',limitLogin,async(req,res)=>{try{
+  const email=normalizeEmail(req.body.email),password=String(req.body.password||'');
+  let row;
+  if(pool)row=(await pool.query('SELECT * FROM users WHERE lower(email)=$1',[email])).rows[0];
+  else row=[...memory.users.values()].find(u=>u.email===email);
+  if(!row||!verifyPassword(password,row.password_hash))return res.status(401).json({error:'البريد الإلكتروني أو كلمة المرور غير صحيحة'});
+  const t=token();
+  if(pool)await pool.query('INSERT INTO sessions(token,user_id) VALUES($1,$2)',[t,row.id]);else (memory.sessions.set(t,row.id),memory.sessionTimes.set(t,Date.now()));
+  res.json({token:t,user:{id:row.id,name:row.name,email:row.email,phone:row.phone,role:row.role}});
+}catch(e){console.error(e);res.status(500).json({error:'تعذر تسجيل الدخول'});}});
+
+function resetCode(){return String(crypto.randomInt(100000,1000000));}
+const RESET_MINUTES=10;
+app.post('/api/auth/forgot-password',limitForgot,async(req,res)=>{try{
+  const email=normalizeEmail(req.body.email);
+  if(!validEmail(email))return res.status(400).json({error:'أدخل بريداً إلكترونياً صحيحاً'});
+  // رد موحّد سواء كان البريد مسجلاً أم لا (منعاً لكشف الحسابات)
+  const generic={ok:true,message:'إن كان البريد مسجلاً فسيصلك رمز التحقق خلال دقائق'};
+  let exists=false;
+  if(pool)exists=!!(await pool.query('SELECT 1 FROM users WHERE lower(email)=$1',[email])).rows[0];
+  else exists=[...memory.users.values()].some(u=>u.email===email);
+  if(!exists)return res.json(generic);
+
+  // مهلة 60 ثانية بين رمزين لنفس البريد
+  let prev;
+  if(pool)prev=(await pool.query('SELECT expires FROM email_resets WHERE email=$1',[email])).rows[0];
+  else{const m=memory.resets.get(email);prev=m?{expires:new Date(m.expires)}:null;}
+  if(prev&&new Date(prev.expires).getTime()>Date.now()+(RESET_MINUTES*60-60)*1000)return res.json(generic);
+
+  const code=resetCode(),expires=new Date(Date.now()+RESET_MINUTES*60*1000),h=codeHash(email,code);
+  if(pool)await pool.query('INSERT INTO email_resets(email,code_hash,expires,attempts) VALUES($1,$2,$3,0) ON CONFLICT (email) DO UPDATE SET code_hash=$2,expires=$3,attempts=0',[email,h,expires]);
+  else memory.resets.set(email,{code_hash:h,expires:expires.getTime(),attempts:0});
+
+  const delivery=await sendEmail(email,'رمز استرجاع كلمة المرور - دلّيني',`رمز استرجاع كلمة المرور في تطبيق دلّيني: ${code}\nصالح لمدة ${RESET_MINUTES} دقائق.\nإذا لم تطلب هذا الرمز فتجاهل الرسالة.`);
+  if(!delivery.sent){
+    console.error('email delivery failed',delivery.gateway,delivery.reason);
+    if(!RESET_DEMO)return res.json(generic);
+  }
+  const body={...generic};
   if(RESET_DEMO)body.devCode=code;
   res.json(body);
 }catch(e){console.error(e);res.status(500).json({error:'تعذر إنشاء رمز التحقق'});}});
 
 app.post('/api/auth/reset-password',limitReset,async(req,res)=>{try{
-  const phone=normalizePhone(req.body.phone),code=String(req.body.code||'').trim(),newPassword=String(req.body.newPassword||req.body.password||'');
+  const email=normalizeEmail(req.body.email),code=String(req.body.code||'').trim(),newPassword=String(req.body.newPassword||req.body.password||'');
+  if(!validEmail(email))return res.status(400).json({error:'أدخل بريداً إلكترونياً صحيحاً'});
   if(code.length!==6)return res.status(400).json({error:'أدخل رمز التحقق المكوّن من 6 أرقام'});
   if(newPassword.length<6)return res.status(400).json({error:'كلمة المرور يجب أن تكون 6 أحرف على الأقل'});
 
   let row;
-  if(pool)row=(await pool.query('SELECT * FROM password_resets WHERE phone=$1',[phone])).rows[0];
-  else{const m=memory.resets.get(phone);row=m?{code:m.code,expires:new Date(m.expires),attempts:m.attempts}:null;}
+  if(pool)row=(await pool.query('SELECT * FROM email_resets WHERE email=$1',[email])).rows[0];
+  else{const m=memory.resets.get(email);row=m?{code_hash:m.code_hash,expires:new Date(m.expires),attempts:m.attempts}:null;}
   if(!row)return res.status(400).json({error:'اطلب رمز التحقق أولاً'});
   if(new Date(row.expires).getTime()<Date.now())return res.status(400).json({error:'انتهت صلاحية الرمز، اطلب رمزاً جديداً'});
   if(Number(row.attempts)>=5)return res.status(429).json({error:'محاولات كثيرة، اطلب رمزاً جديداً'});
 
-  let approved=false;
-  if(String(row.code)==='TWILIO'){
-    const check=await checkTwilioVerify(phone,code);
-    approved=check.approved;
-    if(!approved){
-      if(pool)await pool.query('UPDATE password_resets SET attempts=attempts+1 WHERE phone=$1',[phone]);
-      else{const m=memory.resets.get(phone);if(m)m.attempts+=1;}
-      return res.status(400).json({error:'رمز التحقق غير صحيح أو انتهت صلاحيته'});
-    }
-  }else{
-    approved=String(row.code)===code;
-    if(!approved){
-      if(pool)await pool.query('UPDATE password_resets SET attempts=attempts+1 WHERE phone=$1',[phone]);
-      else{const m=memory.resets.get(phone);if(m)m.attempts+=1;}
-      return res.status(400).json({error:'رمز التحقق غير صحيح'});
-    }
+  const a=Buffer.from(String(row.code_hash),'hex'),b=Buffer.from(codeHash(email,code),'hex');
+  const approved=a.length===b.length&&crypto.timingSafeEqual(a,b);
+  if(!approved){
+    if(pool)await pool.query('UPDATE email_resets SET attempts=attempts+1 WHERE email=$1',[email]);
+    else{const m=memory.resets.get(email);if(m)m.attempts+=1;}
+    return res.status(400).json({error:'رمز التحقق غير صحيح'});
   }
 
   const hash=hashPassword(newPassword);
   if(pool){
-    const r=await pool.query('UPDATE users SET password_hash=$1 WHERE phone=$2 RETURNING id',[hash,phone]);
-    if(!r.rows[0])return res.status(404).json({error:'رقم الهاتف غير مسجل'});
+    const r=await pool.query('UPDATE users SET password_hash=$1 WHERE lower(email)=$2 RETURNING id',[hash,email]);
+    if(!r.rows[0])return res.status(400).json({error:'رمز التحقق غير صحيح'});
     await pool.query('DELETE FROM sessions WHERE user_id=$1',[r.rows[0].id]);
-    await pool.query('DELETE FROM password_resets WHERE phone=$1',[phone]);
+    await pool.query('DELETE FROM email_resets WHERE email=$1',[email]);
   }else{
-    const found=[...memory.users.entries()].find(([,v])=>v.phone===phone);
-    if(!found)return res.status(404).json({error:'رقم الهاتف غير مسجل'});
+    const found=[...memory.users.entries()].find(([,v])=>v.email===email);
+    if(!found)return res.status(400).json({error:'رمز التحقق غير صحيح'});
     memory.users.set(found[0],{...found[1],password_hash:hash});
     for(const [t,uid] of [...memory.sessions.entries()])if(String(uid)===String(found[0]))memory.sessions.delete(t);
-    memory.resets.delete(phone);
+    memory.resets.delete(email);
   }
   res.json({ok:true,message:'تم تغيير كلمة المرور، يمكنك تسجيل الدخول الآن'});
 }catch(e){console.error(e);res.status(500).json({error:'تعذر تغيير كلمة المرور'});}});
@@ -191,8 +222,8 @@ app.post('/api/providers/requests/:id/status',auth,async(req,res)=>{try{if(req.u
 app.get('/api/requests/:id/timeline',auth,async(req,res)=>{if(pool){const r=await pool.query('SELECT * FROM requests WHERE id=$1',[req.params.id]);const x=r.rows[0];if(!x)return res.status(404).json({error:'الطلب غير موجود'});const isOwner=String(x.user_id)===String(req.user.id),isProvider=String(x.provider_id)===String(req.user.id);if(!isOwner&&!isProvider)return res.status(403).json({error:'لا تملك صلاحية عرض هذا الطلب'});const ev=(await pool.query('SELECT status,actor,note,created_at FROM request_events WHERE request_id=$1 ORDER BY created_at ASC',[req.params.id])).rows;return res.json({request:x,status:x.status,statusLabel:STATUS_LABELS[x.status]||x.status,allowedNext:allowedNext(x.status),events:ev.map(e=>({...e,statusLabel:STATUS_LABELS[e.status]||e.status}))});}const x=memory.requests.find(a=>String(a.id)===String(req.params.id));if(!x)return res.status(404).json({error:'الطلب غير موجود'});const isOwner=String(x.user_id)===String(req.user.id),isProvider=String(x.provider_id)===String(req.user.id);if(!isOwner&&!isProvider)return res.status(403).json({error:'لا تملك صلاحية عرض هذا الطلب'});const ev=memory.events.get(String(x.id))||[];res.json({request:x,status:x.status,statusLabel:STATUS_LABELS[x.status]||x.status,allowedNext:allowedNext(x.status),events:ev.map(e=>({...e,statusLabel:STATUS_LABELS[e.status]||e.status}))});});
 
 // الحساب والعناوين والمفضلة والإشعارات والرسائل والدعم
-app.get('/api/profile',auth,async(req,res)=>{try{if(pool){const r=await pool.query('SELECT id,name,phone,role,created_at FROM users WHERE id=$1',[req.user.id]);return res.json({user:r.rows[0]});}res.json({user:req.user});}catch(e){res.status(500).json({error:'تعذر تحميل الملف الشخصي'});}});
-app.put('/api/profile',auth,async(req,res)=>{try{const name=String(req.body.name||'').trim();if(name.length<2)return res.status(400).json({error:'الاسم غير صحيح'});if(pool){const r=await pool.query('UPDATE users SET name=$1 WHERE id=$2 RETURNING id,name,phone,role,created_at',[name,req.user.id]);return res.json({user:r.rows[0]});}const u=[...memory.users.values()].find(x=>String(x.id)===String(req.user.id));if(!u)return res.status(404).json({error:'الحساب غير موجود'});u.name=name;res.json({user:{id:u.id,name:u.name,phone:u.phone,role:u.role,created_at:u.created_at}});}catch(e){res.status(500).json({error:'تعذر تحديث الملف الشخصي'});}});
+app.get('/api/profile',auth,async(req,res)=>{try{if(pool){const r=await pool.query('SELECT id,name,email,phone,role,created_at FROM users WHERE id=$1',[req.user.id]);return res.json({user:r.rows[0]});}res.json({user:req.user});}catch(e){res.status(500).json({error:'تعذر تحميل الملف الشخصي'});}});
+app.put('/api/profile',auth,async(req,res)=>{try{const name=String(req.body.name||'').trim();if(name.length<2)return res.status(400).json({error:'الاسم غير صحيح'});const ph=req.body.phone===undefined?null:normalizePhone(req.body.phone);if(ph&&ph.length<9)return res.status(400).json({error:'رقم الهاتف غير صحيح'});if(pool){const r=await pool.query('UPDATE users SET name=$1,phone=COALESCE($3,phone) WHERE id=$2 RETURNING id,name,email,phone,role,created_at',[name,req.user.id,ph||null]);return res.json({user:r.rows[0]});}const u=[...memory.users.values()].find(x=>String(x.id)===String(req.user.id));if(!u)return res.status(404).json({error:'الحساب غير موجود'});u.name=name;if(ph)u.phone=ph;res.json({user:{id:u.id,name:u.name,email:u.email,phone:u.phone,role:u.role,created_at:u.created_at}});}catch(e){res.status(500).json({error:'تعذر تحديث الملف الشخصي'});}});
 app.get('/api/addresses',auth,async(req,res)=>{if(pool)return res.json((await pool.query('SELECT * FROM addresses WHERE user_id=$1 ORDER BY is_default DESC,created_at DESC',[req.user.id])).rows);res.json((memory.addresses||new Map()).get(String(req.user.id))||[]);});
 app.post('/api/addresses',auth,async(req,res)=>{const label=String(req.body.label||'المنزل').trim(),address=String(req.body.address||'').trim();if(!address)return res.status(400).json({error:'اكتب العنوان'});try{if(pool){if(req.body.isDefault)await pool.query('UPDATE addresses SET is_default=false WHERE user_id=$1',[req.user.id]);const r=await pool.query('INSERT INTO addresses(user_id,label,address,is_default) VALUES($1,$2,$3,$4) RETURNING *',[req.user.id,label,address,!!req.body.isDefault]);return res.status(201).json(r.rows[0]);}if(!memory.addresses)memory.addresses=new Map();const list=memory.addresses.get(String(req.user.id))||[];if(req.body.isDefault)list.forEach(x=>x.is_default=false);const x={id:crypto.randomUUID(),label,address,is_default:!!req.body.isDefault,created_at:new Date().toISOString()};list.unshift(x);memory.addresses.set(String(req.user.id),list);res.status(201).json(x);}catch(e){res.status(500).json({error:'تعذر حفظ العنوان'});}});
 app.delete('/api/addresses/:id',auth,async(req,res)=>{try{if(pool){const r=await pool.query('DELETE FROM addresses WHERE id=$1 AND user_id=$2 RETURNING id',[req.params.id,req.user.id]);if(!r.rows[0])return res.status(404).json({error:'العنوان غير موجود'});return res.json({ok:true});}const list=(memory.addresses?.get(String(req.user.id))||[]).filter(x=>String(x.id)!==String(req.params.id));if(memory.addresses)memory.addresses.set(String(req.user.id),list);res.json({ok:true});}catch(e){res.status(500).json({error:'تعذر حذف العنوان'});}});
